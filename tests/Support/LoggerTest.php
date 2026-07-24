@@ -62,4 +62,30 @@ return [
 
         unlink($logFile);
     },
+    'logger masks double-quoted assignment secrets with escaped quotes' => function (): void {
+        $logFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'queue_logger_test_' . uniqid('', true) . '.log';
+        $logger = new Logger($logFile);
+
+        $logger->error('CLIENT_SECRET="prefix\"secret-tail"');
+
+        $content = file_get_contents($logFile);
+        assert(str_contains($content, 'CLIENT_SECRET=[masked]'));
+        assert(!str_contains($content, 'prefix'));
+        assert(!str_contains($content, 'secret-tail'));
+
+        unlink($logFile);
+    },
+    'logger masks single-quoted assignment secrets with escaped quotes' => function (): void {
+        $logFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'queue_logger_test_' . uniqid('', true) . '.log';
+        $logger = new Logger($logFile);
+
+        $logger->error("CLIENT_SECRET='prefix\\'secret-tail'");
+
+        $content = file_get_contents($logFile);
+        assert(str_contains($content, 'CLIENT_SECRET=[masked]'));
+        assert(!str_contains($content, 'prefix'));
+        assert(!str_contains($content, 'secret-tail'));
+
+        unlink($logFile);
+    },
 ];
