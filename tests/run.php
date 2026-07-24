@@ -5,6 +5,7 @@ require __DIR__ . '/bootstrap.php';
 $files = [
     __DIR__ . '/Config/AppConfigTest.php',
     __DIR__ . '/Support/LoggerTest.php',
+    __DIR__ . '/Queue/FileQueueRepositoryTest.php',
 ];
 
 $passed = 0;
