@@ -41,6 +41,11 @@ final class Logger
             $message,
         );
         $message = preg_replace(
+            '/(?<!["\\w-])(CLIENT_SECRET|DB_PASS(?:WORD)?|ADMIN_PASSWORD|PASSWORD|ACCESS[_-]?TOKEN|TOKEN)\\s*:\\s*(?:"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\')/i',
+            '$1: [masked]',
+            $message,
+        );
+        $message = preg_replace(
             '/(?<!["\\w-])(CLIENT_SECRET|DB_PASS(?:WORD)?|ADMIN_PASSWORD|PASSWORD|ACCESS[_-]?TOKEN|TOKEN)\\s*:\\s*[^\\s,;}]+/i',
             '$1: [masked]',
             $message,

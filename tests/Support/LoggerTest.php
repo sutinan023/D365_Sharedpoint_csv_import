@@ -47,4 +47,19 @@ return [
 
         unlink($logFile);
     },
+    'logger masks quoted colon-delimited secret values' => function (): void {
+        $logFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'queue_logger_test_' . uniqid('', true) . '.log';
+        $logger = new Logger($logFile);
+
+        $logger->error('CLIENT_SECRET: "prefix;secret,brace}tail\\"quoted" access_token: \'token;value,brace}tail\\\'quoted\'');
+
+        $content = file_get_contents($logFile);
+        assert(str_contains($content, 'CLIENT_SECRET: [masked]'));
+        assert(str_contains($content, 'access_token: [masked]'));
+        assert(!str_contains($content, 'prefix;secret,brace}tail'));
+        assert(!str_contains($content, 'token;value,brace}tail'));
+        assert(!str_contains($content, 'quoted'));
+
+        unlink($logFile);
+    },
 ];
