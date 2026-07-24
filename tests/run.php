@@ -6,6 +6,7 @@ $files = [
     __DIR__ . '/Config/AppConfigTest.php',
     __DIR__ . '/Support/LoggerTest.php',
     __DIR__ . '/Queue/FileQueueRepositoryTest.php',
+    __DIR__ . '/SharePoint/SharePointClientTest.php',
 ];
 
 $passed = 0;
