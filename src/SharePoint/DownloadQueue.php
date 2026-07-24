@@ -43,9 +43,7 @@ final class DownloadQueue
                 $this->client->downloadItem($item['drive_id'], $item['id'], $partPath);
                 $this->validateDownload($partPath, isset($item['size']) ? (int) $item['size'] : null);
 
-                if (is_file($finalPath)) {
-                    $finalPath = $this->config->downloadDir . DIRECTORY_SEPARATOR . pathinfo($safeName, PATHINFO_FILENAME) . '_' . $item['id'] . '.csv';
-                }
+                $finalPath = $this->unusedFinalPath($finalPath, $safeName, $item['id']);
 
                 rename($partPath, $finalPath);
                 $sha256 = hash_file('sha256', $finalPath);
@@ -71,5 +69,26 @@ final class DownloadQueue
         if ($expectedSize !== null && filesize($path) !== $expectedSize) {
             throw new RuntimeException('Downloaded file size does not match SharePoint size');
         }
+    }
+
+    private function unusedFinalPath(string $originalPath, string $safeName, string $itemId): string
+    {
+        if (!is_file($originalPath)) {
+            return $originalPath;
+        }
+
+        $directory = dirname($originalPath);
+        $stem = pathinfo($safeName, PATHINFO_FILENAME);
+        $extension = pathinfo($safeName, PATHINFO_EXTENSION);
+        $suffix = 1;
+
+        do {
+            $number = $suffix === 1 ? '' : '_' . $suffix;
+            $candidate = $directory . DIRECTORY_SEPARATOR . $stem . '_' . $itemId . $number
+                . ($extension === '' ? '' : '.' . $extension);
+            $suffix++;
+        } while (is_file($candidate));
+
+        return $candidate;
     }
 }
