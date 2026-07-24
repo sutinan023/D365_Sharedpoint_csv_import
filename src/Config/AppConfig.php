@@ -37,6 +37,10 @@ final class AppConfig
 
     private static function resolvePath(string $rootDir, string $path): string
     {
+        if ($path === '/') {
+            return '/';
+        }
+
         if (str_starts_with($path, '/')) {
             return rtrim($path, '/');
         }

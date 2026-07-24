@@ -26,5 +26,6 @@ return [
         $config = AppConfig::fromEnv(dirname(__DIR__, 2));
 
         assert($config->path('/var/lib/csv-import') === '/var/lib/csv-import');
+        assert($config->path('/') === '/');
     },
 ];
