@@ -3,7 +3,13 @@
     "description": "d365-sharepoint-csv-import",
     "autoload": {
         "psr-4": {
-            "Sutinan\\D365SharepointCsvImport\\": "src/"
+            "Sutinan\\D365SharepointCsvImport\\": "src/",
+            "App\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Tests\\": "tests/"
         }
     },
     "require": {
