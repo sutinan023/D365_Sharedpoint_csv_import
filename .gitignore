@@ -8,6 +8,8 @@ archive/
 error/
 temp/
 logs/
+.worktrees/
+.superpowers/
 
 # Composer dependencies
 vendor/
