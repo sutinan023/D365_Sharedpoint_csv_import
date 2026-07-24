@@ -22,4 +22,9 @@ return [
         assert(str_ends_with($config->errorDir, DIRECTORY_SEPARATOR . 'error'));
         assert(str_ends_with($config->lockFile, DIRECTORY_SEPARATOR . 'temp' . DIRECTORY_SEPARATOR . 'pipeline.lock'));
     },
+    'app config preserves POSIX absolute paths' => function (): void {
+        $config = AppConfig::fromEnv(dirname(__DIR__, 2));
+
+        assert($config->path('/var/lib/csv-import') === '/var/lib/csv-import');
+    },
 ];

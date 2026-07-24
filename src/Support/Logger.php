@@ -30,8 +30,12 @@ final class Logger
 
     public static function sanitize(string $message): string
     {
-        $message = preg_replace('/CLIENT_SECRET=\\S+/i', 'CLIENT_SECRET=[masked]', $message);
-        $message = preg_replace('/token=\\S+/i', 'token=[masked]', $message);
+        $message = preg_replace(
+            '/\\b(CLIENT_SECRET|DB_PASS(?:WORD)?|ADMIN_PASSWORD|PASSWORD|ACCESS[_-]?TOKEN|TOKEN)\\s*=\\s*(?:"[^"]*"|\'[^\']*\'|[^\\s,;]+)/i',
+            '$1=[masked]',
+            $message,
+        );
+        $message = preg_replace('/Authorization\\s*:\\s*Bearer\\s+[^\\s,;]+/i', 'Authorization: Bearer [masked]', $message);
         $message = preg_replace('/https:\\/\\/[^\\s]*sharepoint\\.com\\/\\S+/i', 'https://contoso.sharepoint.com/[masked-url]', $message);
 
         return $message;

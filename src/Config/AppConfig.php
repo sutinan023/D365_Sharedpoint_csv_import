@@ -37,6 +37,10 @@ final class AppConfig
 
     private static function resolvePath(string $rootDir, string $path): string
     {
+        if (str_starts_with($path, '/')) {
+            return rtrim($path, '/');
+        }
+
         $path = str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $path);
 
         if (preg_match('/^[A-Za-z]:[\\\\\\/]/', $path) === 1 || str_starts_with($path, '\\\\')) {
