@@ -66,6 +66,10 @@ final class SharePointClient
     public function resolveFolderItemId(string $folderPath): string
     {
         $driveId = $this->env['DRIVE_ID'] ?? null;
+        if ($driveId === null || $driveId === '') {
+            throw new RuntimeException('DRIVE_ID is required');
+        }
+
         $encoded = implode('/', array_map('rawurlencode', explode('/', trim($folderPath, '/'))));
         $url = "https://graph.microsoft.com/v1.0/drives/{$driveId}/root:/{$encoded}";
         [$status, , $body] = ($this->http)('GET', $url, $this->headers());
@@ -85,7 +89,10 @@ final class SharePointClient
             throw new RuntimeException("Graph download failed with HTTP {$status}");
         }
 
-        file_put_contents($targetPath, $body);
+        $bytesWritten = @file_put_contents($targetPath, $body);
+        if ($bytesWritten === false || $bytesWritten !== strlen($body)) {
+            throw new RuntimeException("Unable to write downloaded file to {$targetPath}");
+        }
     }
 
     public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void
@@ -133,7 +140,8 @@ final class SharePointClient
             throw new RuntimeException('SITE_HOST and SITE_PATH are required');
         }
 
-        $url = 'https://graph.microsoft.com/v1.0/sites/' . rawurlencode($siteHost) . ':' . $sitePath;
+        $encodedPath = implode('/', array_map('rawurlencode', explode('/', trim($sitePath, '/'))));
+        $url = 'https://graph.microsoft.com/v1.0/sites/' . rawurlencode($siteHost) . ':/' . $encodedPath;
         [$status, , $response] = ($this->http)('GET', $url, ['Authorization: Bearer ' . $token]);
         if ($status < 200 || $status >= 300) {
             throw new RuntimeException("Graph site resolve failed with HTTP {$status}");
