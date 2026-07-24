@@ -1,0 +1,17 @@
+# Local environment secrets
+config/.env
+.env
+
+# Runtime files
+download/
+archive/
+error/
+temp/
+logs/
+
+# Composer dependencies
+vendor/
+
+# OS/editor noise
+Thumbs.db
+.DS_Store

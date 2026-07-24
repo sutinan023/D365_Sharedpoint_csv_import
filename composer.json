@@ -1,0 +1,12 @@
+{
+    "name": "sutinan/d365-sharepoint-csv-import",
+    "description": "d365-sharepoint-csv-import",
+    "autoload": {
+        "psr-4": {
+            "Sutinan\\D365SharepointCsvImport\\": "src/"
+        }
+    },
+    "require": {
+        "vlucas/phpdotenv": "^5.6"
+    }
+}
