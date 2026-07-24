@@ -26,4 +26,25 @@ return [
 
         unlink($logFile);
     },
+    'logger masks escaped JSON and colon-delimited secret values' => function (): void {
+        $logFile = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'queue_logger_test_' . uniqid('', true) . '.log';
+        $logger = new Logger($logFile);
+
+        $logger->error('{"password":"prefix\\"secret-tail"} CLIENT_SECRET: colon-secret access_token: token-value DB_PASS: db-secret password: plain-secret');
+
+        $content = file_get_contents($logFile);
+        assert(str_contains($content, '"password":"[masked]"'));
+        assert(str_contains($content, 'CLIENT_SECRET: [masked]'));
+        assert(str_contains($content, 'access_token: [masked]'));
+        assert(str_contains($content, 'DB_PASS: [masked]'));
+        assert(str_contains($content, 'password: [masked]'));
+        assert(!str_contains($content, 'prefix'));
+        assert(!str_contains($content, 'secret-tail'));
+        assert(!str_contains($content, 'colon-secret'));
+        assert(!str_contains($content, 'token-value'));
+        assert(!str_contains($content, 'db-secret'));
+        assert(!str_contains($content, 'plain-secret'));
+
+        unlink($logFile);
+    },
 ];
