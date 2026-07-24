@@ -8,6 +8,7 @@ $files = [
     __DIR__ . '/Queue/FileQueueRepositoryTest.php',
     __DIR__ . '/SharePoint/SharePointClientTest.php',
     __DIR__ . '/SharePoint/DownloadQueueTest.php',
+    __DIR__ . '/Import/PaymentBeforePostImporterTest.php',
 ];
 
 $passed = 0;
