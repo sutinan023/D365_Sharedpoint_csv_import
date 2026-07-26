@@ -9,6 +9,8 @@ $files = [
     __DIR__ . '/SharePoint/SharePointClientTest.php',
     __DIR__ . '/SharePoint/DownloadQueueTest.php',
     __DIR__ . '/Import/PaymentBeforePostImporterTest.php',
+    __DIR__ . '/Import/ImportQueueTest.php',
+    __DIR__ . '/Support/PipelineLockTest.php',
 ];
 
 $passed = 0;
