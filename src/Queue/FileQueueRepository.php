@@ -109,6 +109,38 @@ final class FileQueueRepository
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
+    public function findTerminalRowsInDownload(string $downloadDir, int $olderThanDays): array
+    {
+        $downloadPrefix = rtrim(str_replace('\\', '/', $downloadDir), '/') . '/';
+        $cutoff = (new DateTimeImmutable("-{$olderThanDays} days"))->format('Y-m-d H:i:s');
+
+        $stmt = $this->pdo->prepare(
+            "SELECT * FROM sharepoint_file_queue
+             WHERE status IN ('SUCCESS', 'IMPORTED', 'SKIPPED_DUPLICATE')
+               AND local_path IS NOT NULL
+               AND REPLACE(local_path, '\\', '/') LIKE :download_prefix
+               AND LOWER(local_path) LIKE '%.csv'
+               AND COALESCE(imported_at, updated_at, created_at) < :cutoff
+             ORDER BY COALESCE(imported_at, updated_at, created_at) ASC, id ASC"
+        );
+        $stmt->execute([
+            ':download_prefix' => $downloadPrefix . '%',
+            ':cutoff' => $cutoff,
+        ]);
+
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function updateLocalPath(int $id, string $localPath): void
+    {
+        $stmt = $this->pdo->prepare(
+            'UPDATE sharepoint_file_queue
+             SET local_path = :local_path, updated_at = CURRENT_TIMESTAMP
+             WHERE id = :id'
+        );
+        $stmt->execute([':local_path' => $localPath, ':id' => $id]);
+    }
+
     public function markStatus(int $id, string $status, ?string $error = null): void
     {
         $stmt = $this->pdo->prepare(
