@@ -113,4 +113,26 @@ return [
             rmdir($directory);
         }
     },
+    'interrupted import refuses retry when the local file hash differs from the queue hash' => function (): void {
+        $directory = createImporterTestDirectory();
+        $filePath = $directory . DIRECTORY_SEPARATOR . 'changed.csv';
+        file_put_contents($filePath, 'changed after queueing');
+
+        try {
+            $pdo = createImporterTestPdo();
+            $importer = new PaymentBeforePostImporter($pdo, $directory . DIRECTORY_SEPARATOR . 'archive');
+
+            $result = $importer->reconcileInterruptedImport([
+                'local_path' => $filePath,
+                'file_name' => 'changed.csv',
+                'local_sha256' => hash('sha256', 'original queued bytes'),
+            ]);
+
+            assert($result['action'] === 'BLOCKED');
+            assert(str_contains($result['message'], 'hash'));
+        } finally {
+            unlink($filePath);
+            rmdir($directory);
+        }
+    },
 ];

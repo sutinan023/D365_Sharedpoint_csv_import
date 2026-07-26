@@ -84,6 +84,7 @@ final class FileQueueRepository
         $stmt = $this->pdo->query(
             "SELECT * FROM sharepoint_file_queue
              WHERE status = 'IMPORTING'
+                OR (status = 'RECOVERY_ERROR' AND moved_at IS NOT NULL)
              ORDER BY sharepoint_last_modified_at ASC, id ASC"
         );
 
@@ -96,6 +97,12 @@ final class FileQueueRepository
             "SELECT * FROM sharepoint_file_queue
              WHERE status IN ('DOWNLOADED', 'MOVING')
                 OR (status = 'ERROR' AND local_path IS NOT NULL AND local_sha256 IS NOT NULL)
+                OR (
+                    status = 'RECOVERY_ERROR'
+                    AND moved_at IS NULL
+                    AND local_path IS NOT NULL
+                    AND local_sha256 IS NOT NULL
+                )
              ORDER BY sharepoint_last_modified_at ASC, id ASC"
         );
 

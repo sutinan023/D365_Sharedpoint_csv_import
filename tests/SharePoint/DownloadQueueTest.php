@@ -1,6 +1,8 @@
 <?php
 
 use App\Config\AppConfig;
+use App\Import\ImportQueue;
+use App\Queue\FileQueueRepository;
 use App\SharePoint\DownloadQueue;
 
 function downloadQueueConfig(string $root): AppConfig
@@ -25,6 +27,20 @@ function downloadQueueItem(string $id = 'item1', int $size = 5): array
         'eTag' => 'etag1',
         'lastModifiedDateTime' => '2026-07-24T01:00:00Z',
     ];
+}
+
+function downloadQueueRepository(): array
+{
+    $pdo = new PDO('sqlite::memory:');
+    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $migration = str_replace(
+        ['INT AUTO_INCREMENT PRIMARY KEY', 'BIGINT', 'DATETIME', 'TEXT', 'UNIQUE KEY uq_sharepoint_file_queue_item_id (item_id),', 'KEY idx_sharepoint_file_queue_status_modified (status, sharepoint_last_modified_at),', 'KEY idx_sharepoint_file_queue_sha256 (local_sha256)', 'DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'],
+        ['INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'TEXT', 'TEXT', 'UNIQUE (item_id),', '', '', "DEFAULT CURRENT_TIMESTAMP"],
+        file_get_contents(dirname(__DIR__, 2) . '/database/migrations/001_create_sharepoint_file_queue.sql')
+    );
+    $pdo->exec(preg_replace('/,\s*\);$/', "\n);", $migration));
+
+    return [$pdo, new FileQueueRepository($pdo)];
 }
 
 return [
@@ -370,6 +386,98 @@ return [
 
         assert($repo->row['status'] === 'RECOVERY_ERROR');
         assert(str_contains($repo->row['last_error'], 'redownload'));
+    },
+    'failed recovery redownload remains blocking and prevents a newer import' => function (): void {
+        [$pdo, $repo] = downloadQueueRepository();
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);
+        mkdir($root . DIRECTORY_SEPARATOR . 'download', 0777, true);
+        $config = downloadQueueConfig($root);
+
+        $older = $repo->upsertDiscovered([
+            'drive_id' => 'drive',
+            'id' => 'recovery-redownload',
+            'name' => 'first.csv',
+            'size' => 5,
+            'lastModifiedDateTime' => '2026-07-24T01:00:00Z',
+        ], 'PaymentBeforePost', 'PaymentBeforePost_Downloaded');
+        $repo->markDownloaded($older, $root . DIRECTORY_SEPARATOR . 'missing.csv', str_repeat('a', 64));
+        $repo->resetForRedownload($older, 'local recovery file is missing');
+
+        $newPath = $root . DIRECTORY_SEPARATOR . 'newer.csv';
+        file_put_contents($newPath, 'newer');
+        $newer = $repo->upsertDiscovered([
+            'drive_id' => 'drive',
+            'id' => 'newer-ready',
+            'name' => 'newer.csv',
+            'size' => 5,
+            'lastModifiedDateTime' => '2026-07-24T02:00:00Z',
+        ], 'PaymentBeforePost', 'PaymentBeforePost_Downloaded');
+        $repo->markDownloaded($newer, $newPath, hash_file('sha256', $newPath));
+        $repo->markMoved($newer);
+
+        $client = new class {
+            public function listCsvFiles(string $folder): array {
+                return [downloadQueueItem('recovery-redownload')];
+            }
+            public function resolveFolderItemId(string $folder): string { return 'processed-folder-id'; }
+            public function downloadItem(string $driveId, string $itemId, string $targetPath): void {
+                throw new RuntimeException('recovery download failed');
+            }
+            public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void {}
+        };
+        (new DownloadQueue($client, $repo, $config))->run();
+
+        $importer = new class {
+            public array $called = [];
+            public function reconcileInterruptedImport(array $row): array {
+                return ['action' => 'BLOCKED', 'message' => 'not an import recovery row'];
+            }
+            public function isDuplicateHash(string $sha256): bool { return false; }
+            public function importFile(string $filePath, ?int $queueId = null): string {
+                $this->called[] = $queueId;
+                return 'imported';
+            }
+        };
+        (new ImportQueue($repo, $importer))->run();
+
+        $statuses = $pdo->query('SELECT id, status FROM sharepoint_file_queue ORDER BY id')
+            ->fetchAll(PDO::FETCH_KEY_PAIR);
+        assert($statuses[$older] === 'RECOVERY_ERROR');
+        assert($statuses[$newer] === 'MOVED');
+        assert($importer->called === []);
+    },
+    'failed move retry from a recovery row remains a recovery error' => function (): void {
+        [$pdo, $repo] = downloadQueueRepository();
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);
+        mkdir($root . DIRECTORY_SEPARATOR . 'download', 0777, true);
+        $config = downloadQueueConfig($root);
+        $localPath = $root . DIRECTORY_SEPARATOR . 'download' . DIRECTORY_SEPARATOR . 'recovered.csv';
+        file_put_contents($localPath, '12345');
+
+        $id = $repo->upsertDiscovered([
+            'drive_id' => 'drive',
+            'id' => 'recovery-move',
+            'name' => 'recovered.csv',
+            'size' => 5,
+            'lastModifiedDateTime' => '2026-07-24T01:00:00Z',
+        ], 'PaymentBeforePost', 'PaymentBeforePost_Downloaded');
+        $repo->markDownloaded($id, $localPath, hash_file('sha256', $localPath));
+        $repo->markStatus($id, 'RECOVERY_ERROR', 'move failed during recovery redownload');
+
+        $client = new class {
+            public function listCsvFiles(string $folder): array { return []; }
+            public function resolveFolderItemId(string $folder): string { return 'processed-folder-id'; }
+            public function downloadItem(string $driveId, string $itemId, string $targetPath): void {}
+            public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void {
+                throw new RuntimeException('recovery move still failing');
+            }
+        };
+
+        (new DownloadQueue($client, $repo, $config))->run();
+
+        $row = $repo->findByItemId('recovery-move');
+        assert($row['status'] === 'RECOVERY_ERROR');
+        assert($row['last_error'] === 'recovery move still failing');
     },
     'download queue does not move remote item when local rename fails' => function (): void {
         $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);

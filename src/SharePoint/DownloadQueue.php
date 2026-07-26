@@ -52,6 +52,7 @@ final class DownloadQueue
             $finalizedPath = null;
             $downloadRecorded = false;
             $moving = false;
+            $recoveryRedownload = ($existing['status'] ?? '') === 'RECOVERY_ERROR';
 
             try {
                 $this->repo->markStatus($id, 'DOWNLOADING');
@@ -87,7 +88,8 @@ final class DownloadQueue
                 if (!$downloadRecorded && $finalizedPath !== null && is_file($finalizedPath)) {
                     unlink($finalizedPath);
                 }
-                $this->repo->markStatus($id, $moving ? 'MOVING' : 'ERROR', $e->getMessage());
+                $status = $recoveryRedownload ? 'RECOVERY_ERROR' : ($moving ? 'MOVING' : 'ERROR');
+                $this->repo->markStatus($id, $status, $e->getMessage());
             }
         }
     }
@@ -99,6 +101,7 @@ final class DownloadQueue
         foreach ($this->repo->findPendingMoves() as $row) {
             $id = (int) $row['id'];
             $itemId = (string) $row['item_id'];
+            $recoveryMove = ($row['status'] ?? '') === 'RECOVERY_ERROR';
 
             try {
                 $localPath = (string) ($row['local_path'] ?? '');
@@ -126,7 +129,7 @@ final class DownloadQueue
                 $this->client->moveItem((string) $row['drive_id'], $itemId, $processedFolderId);
                 $this->repo->markMoved($id);
             } catch (\Throwable $e) {
-                $this->repo->markStatus($id, 'MOVING', $e->getMessage());
+                $this->repo->markStatus($id, $recoveryMove ? 'RECOVERY_ERROR' : 'MOVING', $e->getMessage());
             }
         }
 

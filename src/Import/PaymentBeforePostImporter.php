@@ -25,7 +25,10 @@ final class PaymentBeforePostImporter
     public function reconcileInterruptedImport(array $row): array
     {
         $localPath = (string) ($row['local_path'] ?? '');
-        $fileName = basename((string) ($row['file_name'] ?? $localPath));
+        $fileName = basename($localPath);
+        if ($fileName === '') {
+            $fileName = basename((string) ($row['file_name'] ?? ''));
+        }
         $sha256 = (string) ($row['local_sha256'] ?? '');
         $importStatus = $sha256 === '' ? null : $this->findImportStatus($sha256);
 
@@ -72,6 +75,14 @@ final class PaymentBeforePostImporter
         }
 
         if ($localPath !== '' && is_file($localPath)) {
+            $actualHash = hash_file('sha256', $localPath);
+            if ($actualHash === false || $sha256 === '' || !hash_equals($sha256, $actualHash)) {
+                return [
+                    'action' => 'BLOCKED',
+                    'message' => 'Interrupted import local file hash does not match the queued SHA-256',
+                ];
+            }
+
             return ['action' => 'RETRY', 'message' => null];
         }
 
@@ -263,15 +274,11 @@ final class PaymentBeforePostImporter
 
     private function findImportStatus(string $sha256): ?string
     {
-        try {
-            $stmt = $this->pdo->prepare('SELECT status FROM import_files WHERE file_hash = :hash LIMIT 1');
-            $stmt->execute([':hash' => $sha256]);
-            $status = $stmt->fetchColumn();
+        $stmt = $this->pdo->prepare('SELECT status FROM import_files WHERE file_hash = :hash LIMIT 1');
+        $stmt->execute([':hash' => $sha256]);
+        $status = $stmt->fetchColumn();
 
-            return $status === false ? null : (string) $status;
-        } catch (\Throwable) {
-            return null;
-        }
+        return $status === false ? null : (string) $status;
     }
 
     private function markImportSuccessful(string $sha256): void

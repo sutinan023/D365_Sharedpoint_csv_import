@@ -260,4 +260,97 @@ return [
             'PENDING_ARCHIVE'
         ));
     },
+    'import recovery error is reconciled after its local file is restored' => function (): void {
+        [$pdo, $repo] = importQueueRepository();
+        $pdo->exec('CREATE TABLE import_files (
+            file_hash TEXT PRIMARY KEY,
+            source_file_name TEXT,
+            local_file_name TEXT,
+            status TEXT NOT NULL,
+            imported_at TEXT
+        )');
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'import_queue_' . uniqid('', true);
+        $archiveDir = $root . DIRECTORY_SEPARATOR . 'archive';
+        mkdir($archiveDir, 0777, true);
+        $localPath = $root . DIRECTORY_SEPARATOR . 'restore-later.csv';
+        $id = enqueueImportFile(
+            $repo,
+            'restore-later-item',
+            'restore-later.csv',
+            '2026-07-24T01:00:00Z',
+            $localPath
+        );
+        $contents = file_get_contents($localPath);
+        $hash = hash_file('sha256', $localPath);
+        $repo->markStatus($id, 'IMPORTING');
+        $pdo->prepare(
+            "INSERT INTO import_files (file_hash, source_file_name, local_file_name, status)
+             VALUES (?, 'restore-later.csv', ?, 'PENDING_ARCHIVE')"
+        )->execute([$hash, $localPath]);
+        unlink($localPath);
+
+        $importer = new PaymentBeforePostImporter($pdo, $archiveDir);
+        (new ImportQueue($repo, $importer))->run();
+        assert($pdo->query("SELECT status FROM sharepoint_file_queue WHERE id = {$id}")->fetchColumn() === 'RECOVERY_ERROR');
+
+        file_put_contents($localPath, $contents);
+        (new ImportQueue($repo, $importer))->run();
+
+        assert($pdo->query("SELECT status FROM sharepoint_file_queue WHERE id = {$id}")->fetchColumn() === 'IMPORTED');
+        assert($pdo->query("SELECT status FROM import_files WHERE file_hash = '{$hash}'")->fetchColumn() === 'SUCCESS');
+    },
+    'interrupted import finds an archived fallback local filename by hash' => function (): void {
+        [$pdo, $repo] = importQueueRepository();
+        $pdo->exec('CREATE TABLE import_files (
+            file_hash TEXT PRIMARY KEY,
+            source_file_name TEXT,
+            local_file_name TEXT,
+            status TEXT NOT NULL,
+            imported_at TEXT
+        )');
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'import_queue_' . uniqid('', true);
+        $archiveDir = $root . DIRECTORY_SEPARATOR . 'archive';
+        mkdir($archiveDir, 0777, true);
+        $localPath = $root . DIRECTORY_SEPARATOR . 'first_fallback.csv';
+        $id = enqueueImportFile(
+            $repo,
+            'fallback-item',
+            'first.csv',
+            '2026-07-24T01:00:00Z',
+            $localPath
+        );
+        $hash = hash_file('sha256', $localPath);
+        $repo->markStatus($id, 'IMPORTING');
+        $pdo->prepare(
+            "INSERT INTO import_files (file_hash, source_file_name, local_file_name, status)
+             VALUES (?, 'first.csv', ?, 'PENDING_ARCHIVE')"
+        )->execute([$hash, $localPath]);
+        rename($localPath, $archiveDir . DIRECTORY_SEPARATOR . '20260724_010203_first_fallback.csv');
+
+        (new ImportQueue($repo, new PaymentBeforePostImporter($pdo, $archiveDir)))->run();
+
+        assert($pdo->query("SELECT status FROM sharepoint_file_queue WHERE id = {$id}")->fetchColumn() === 'IMPORTED');
+        assert($pdo->query("SELECT status FROM import_files WHERE file_hash = '{$hash}'")->fetchColumn() === 'SUCCESS');
+    },
+    'import evidence lookup failure becomes an actionable recovery error' => function (): void {
+        [$pdo, $repo] = importQueueRepository();
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'import_queue_' . uniqid('', true);
+        mkdir($root, 0777, true);
+        $localPath = $root . DIRECTORY_SEPARATOR . 'db-failure.csv';
+        $id = enqueueImportFile(
+            $repo,
+            'db-failure-item',
+            'db-failure.csv',
+            '2026-07-24T01:00:00Z',
+            $localPath
+        );
+        $repo->markStatus($id, 'IMPORTING');
+
+        (new ImportQueue($repo, new PaymentBeforePostImporter($pdo, $root . DIRECTORY_SEPARATOR . 'archive')))->run();
+
+        $row = $repo->findByItemId('db-failure-item');
+        assert($row['status'] === 'RECOVERY_ERROR');
+        assert(str_contains($row['last_error'], 'Interrupted import recovery failed'));
+        assert(str_contains($row['last_error'], 'import_files'));
+    },
 ];
