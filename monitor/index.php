@@ -99,6 +99,31 @@ $todaySummary = $pdo->query("
     WHERE DATE(imported_at) = CURDATE()
 ")->fetch(PDO::FETCH_ASSOC);
 
+$queueStatusStmt = $pdo->query("
+    SELECT status, COUNT(*) AS total
+    FROM sharepoint_file_queue
+    GROUP BY status
+    ORDER BY status
+");
+$queueStatusCounts = $queueStatusStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$queueLatestStmt = $pdo->query("
+    SELECT file_name, status, attempt_count, last_error, downloaded_at, moved_at, imported_at, updated_at
+    FROM sharepoint_file_queue
+    ORDER BY updated_at DESC
+    LIMIT 20
+");
+$queueLatestFiles = $queueLatestStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$oldestImportErrorStmt = $pdo->query("
+    SELECT file_name, last_error, updated_at
+    FROM sharepoint_file_queue
+    WHERE status = 'IMPORT_ERROR'
+    ORDER BY sharepoint_last_modified_at ASC, id ASC
+    LIMIT 1
+");
+$oldestImportError = $oldestImportErrorStmt->fetch(PDO::FETCH_ASSOC);
+
 $workflowSummary = $pdo->query("
     SELECT
         workflow_approval_status,
@@ -214,6 +239,60 @@ $duplicateVoucher = $pdo->query("
                 <div class="text-muted small">Error</div>
                 <h5 class="status-error"><?= number_format($todaySummary['error_import'] ?? 0) ?></h5>
             </div>
+        </div>
+    </div>
+
+    <?php if ($oldestImportError): ?>
+        <div class="alert alert-danger">
+            Oldest import error: <?= htmlspecialchars($oldestImportError['file_name']) ?>
+            <?= htmlspecialchars($oldestImportError['last_error'] ?? '') ?>
+        </div>
+    <?php endif; ?>
+
+    <div class="card p-3 mb-4">
+        <h6 class="mb-3">SharePoint Queue</h6>
+        <div class="d-flex flex-wrap gap-2 mb-3">
+            <?php foreach ($queueStatusCounts as $row): ?>
+                <span class="badge text-bg-secondary">
+                    <?= htmlspecialchars($row['status']) ?>: <?= number_format($row['total']) ?>
+                </span>
+            <?php endforeach; ?>
+            <?php if (!$queueStatusCounts): ?>
+                <span class="text-muted small">No queue files</span>
+            <?php endif; ?>
+        </div>
+        <div class="table-responsive">
+            <table class="table table-hover table-sm align-middle mb-0">
+                <thead>
+                <tr>
+                    <th>File</th>
+                    <th>Status</th>
+                    <th class="text-end">Attempts</th>
+                    <th>Last Error</th>
+                    <th>Downloaded</th>
+                    <th>Moved</th>
+                    <th>Imported</th>
+                    <th>Updated</th>
+                </tr>
+                </thead>
+                <tbody>
+                <?php foreach ($queueLatestFiles as $row): ?>
+                    <tr>
+                        <td><?= htmlspecialchars($row['file_name']) ?></td>
+                        <td><?= htmlspecialchars($row['status']) ?></td>
+                        <td class="text-end"><?= number_format($row['attempt_count']) ?></td>
+                        <td><?= htmlspecialchars($row['last_error'] ?? '-') ?></td>
+                        <td><?= htmlspecialchars($row['downloaded_at'] ?? '-') ?></td>
+                        <td><?= htmlspecialchars($row['moved_at'] ?? '-') ?></td>
+                        <td><?= htmlspecialchars($row['imported_at'] ?? '-') ?></td>
+                        <td><?= htmlspecialchars($row['updated_at'] ?? '-') ?></td>
+                    </tr>
+                <?php endforeach; ?>
+                <?php if (!$queueLatestFiles): ?>
+                    <tr><td colspan="8" class="text-muted text-center">No queue files</td></tr>
+                <?php endif; ?>
+                </tbody>
+            </table>
         </div>
     </div>
 

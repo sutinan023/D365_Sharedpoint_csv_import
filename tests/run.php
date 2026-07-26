@@ -11,6 +11,7 @@ $files = [
     __DIR__ . '/Import/PaymentBeforePostImporterTest.php',
     __DIR__ . '/Import/ImportQueueTest.php',
     __DIR__ . '/Support/PipelineLockTest.php',
+    __DIR__ . '/Monitor/MonitorQueryTest.php',
 ];
 
 $passed = 0;
