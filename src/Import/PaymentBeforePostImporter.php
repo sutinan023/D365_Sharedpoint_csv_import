@@ -10,6 +10,7 @@ final class PaymentBeforePostImporter
     public function __construct(
         private readonly PDO $pdo,
         private readonly string $archiveDir,
+        private readonly ?\Closure $archiveMover = null,
     ) {
     }
 
@@ -23,6 +24,7 @@ final class PaymentBeforePostImporter
 
     public function importFile(string $filePath, ?int $queueId = null): string
     {
+        // Reserved for queue status updates when importer execution is linked to queue records.
         if (!is_file($filePath)) {
             throw new RuntimeException("CSV file not found: {$filePath}");
         }
@@ -106,56 +108,56 @@ final class PaymentBeforePostImporter
             fclose($handle);
             $handle = null;
 
-            $statements = $this->prepareMainStatements();
             $newCount = 0;
             $sameCount = 0;
             $updateCount = 0;
-            foreach ($selectedRows as $item) {
-                $currentData = $item['data'];
-                $rowHash = $this->buildRowHash($currentData);
-                $statements['select']->execute([
-                    $currentData['company'], $currentData['journal_batch'],
-                    $currentData['voucher_number'], $currentData['invoice_number'],
-                ]);
-                $existing = $statements['select']->fetch(PDO::FETCH_ASSOC);
+            if ($selectedRows !== []) {
+                $statements = $this->prepareMainStatements();
+                foreach ($selectedRows as $item) {
+                    $currentData = $item['data'];
+                    $rowHash = $this->buildRowHash($currentData);
+                    $statements['select']->execute([
+                        $currentData['company'], $currentData['journal_batch'],
+                        $currentData['voucher_number'], $currentData['invoice_number'],
+                    ]);
+                    $existing = $statements['select']->fetch(PDO::FETCH_ASSOC);
 
-                if ($existing === false) {
-                    $statements['insert']->execute($this->mainInsertValues($fileName, $fileHash, $rowHash, $currentData));
-                    $paymentId = $this->pdo->lastInsertId();
+                    if ($existing === false) {
+                        $statements['insert']->execute($this->mainInsertValues($fileName, $fileHash, $rowHash, $currentData));
+                        $paymentId = $this->pdo->lastInsertId();
+                        $statements['history']->execute([
+                            $paymentId, $fileName, $currentData['import_export_reference'], $rowHash, 'INSERT', null,
+                            json_encode($currentData, JSON_UNESCAPED_UNICODE),
+                        ]);
+                        $newCount++;
+                        continue;
+                    }
+
+                    if ($existing['row_hash'] === $rowHash) {
+                        $statements['seen']->execute([$fileName, $fileHash, $existing['id']]);
+                        $sameCount++;
+                        continue;
+                    }
+
+                    $statements['update']->execute($this->mainUpdateValues($fileName, $fileHash, $rowHash, $currentData, $existing['id']));
                     $statements['history']->execute([
-                        $paymentId, $fileName, $currentData['import_export_reference'], $rowHash, 'INSERT', null,
+                        $existing['id'], $fileName, $currentData['import_export_reference'], $rowHash, 'UPDATE',
+                        json_encode($this->buildOldData($existing), JSON_UNESCAPED_UNICODE),
                         json_encode($currentData, JSON_UNESCAPED_UNICODE),
                     ]);
-                    $newCount++;
-                    continue;
+                    $updateCount++;
                 }
-
-                if ($existing['row_hash'] === $rowHash) {
-                    $statements['seen']->execute([$fileName, $fileHash, $existing['id']]);
-                    $sameCount++;
-                    continue;
-                }
-
-                $statements['update']->execute($this->mainUpdateValues($fileName, $fileHash, $rowHash, $currentData, $existing['id']));
-                $statements['history']->execute([
-                    $existing['id'], $fileName, $currentData['import_export_reference'], $rowHash, 'UPDATE',
-                    json_encode($this->buildOldData($existing), JSON_UNESCAPED_UNICODE),
-                    json_encode($currentData, JSON_UNESCAPED_UNICODE),
-                ]);
-                $updateCount++;
             }
 
             $message = 'Import completed | staging=' . $stagingRowCount . ', selected=' . count($selectedRows)
                 . ", new={$newCount}, updated={$updateCount}, same={$sameCount}";
-            $this->recordImport($fileName, $filePath, $fileHash, 'SUCCESS', $stagingRowCount, $message);
+            $this->recordImport($fileName, $filePath, $fileHash, 'PENDING_ARCHIVE', $stagingRowCount, $message);
 
             $this->pdo->commit();
             $transactionCommitted = true;
 
-            $archivePath = rtrim($this->archiveDir, "\\/") . DIRECTORY_SEPARATOR . date('Ymd_His_') . $fileName;
-            if (!rename($filePath, $archivePath)) {
-                throw new RuntimeException("Unable to archive CSV file: {$filePath}");
-            }
+            $archivePath = $this->archiveFile($filePath, $fileName);
+            $this->recordImport($fileName, $filePath, $fileHash, 'SUCCESS', $stagingRowCount, $message);
 
             echo "STAGING ROWS: {$stagingRowCount}\n";
             echo 'SELECTED CURRENT ROWS: ' . count($selectedRows) . "\n";
@@ -184,6 +186,20 @@ final class PaymentBeforePostImporter
 
             throw $exception;
         }
+    }
+
+    private function archiveFile(string $filePath, string $fileName): string
+    {
+        $archivePath = rtrim($this->archiveDir, "\\/") . DIRECTORY_SEPARATOR . date('Ymd_His_') . $fileName;
+        $moved = $this->archiveMover === null
+            ? rename($filePath, $archivePath)
+            : ($this->archiveMover)($filePath, $archivePath);
+
+        if (!$moved) {
+            throw new RuntimeException("Unable to archive CSV file: {$filePath}");
+        }
+
+        return $archivePath;
     }
 
     private function detectDelimiter(string $filePath): string
@@ -416,6 +432,25 @@ final class PaymentBeforePostImporter
         int $totalRows,
         string $message,
     ): void {
+        if ($this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            $stmt = $this->pdo->prepare(
+                "INSERT INTO import_files (
+                    source_file_name, file_type, local_file_name, file_hash, status, total_rows, message
+                ) VALUES (?, 'PAYMENT BEFORE POST', ?, ?, ?, ?, ?)
+                ON CONFLICT(file_hash) DO UPDATE SET
+                    source_file_name = excluded.source_file_name,
+                    file_type = excluded.file_type,
+                    local_file_name = excluded.local_file_name,
+                    status = excluded.status,
+                    total_rows = excluded.total_rows,
+                    message = excluded.message,
+                    imported_at = CURRENT_TIMESTAMP"
+            );
+            $stmt->execute([$fileName, $filePath, $fileHash, $status, $totalRows, $message]);
+
+            return;
+        }
+
         $stmt = $this->pdo->prepare(
             "INSERT INTO import_files (
                 source_file_name, file_type, local_file_name, file_hash, status, total_rows, message
