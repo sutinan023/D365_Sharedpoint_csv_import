@@ -71,6 +71,19 @@ DB_PASS=
 ADMIN_USERNAME=admin
 ADMIN_PASSWORD=123456
 
+Database migration:
+Run database/migrations/001_create_sharepoint_file_queue.sql before enabling the new scheduler.
+
+SharePoint folders:
+- Source: PaymentBeforePost
+- Processed: PaymentBeforePost_Downloaded
+
+Local folders:
+- download/: verified downloaded CSVs waiting for import
+- archive/: successfully imported CSVs
+- error/: operator-controlled error storage
+- logs/: runtime logs
+
 Main Flow
 --------------------------------------------------------
 
@@ -208,7 +221,17 @@ Windows Task Scheduler
 Run every 5 minutes
 
 Command:
-php C:\xampp\htdocs\D365_Sharedpoint_csv_import\import\run_import.php
+php C:\xampp\htdocs\D365_Sharedpoint_csv_import\import\run_pipeline.php
+
+The scheduler must run only this pipeline entrypoint. It prevents overlapping runs,
+then downloads, moves, and imports queued files in order.
+
+Recovery:
+- DOWNLOADING: remove stale .part file and retry.
+- DOWNLOADED: retry SharePoint move.
+- MOVED: ready for local import.
+- IMPORT_ERROR: fix the CSV or data issue before newer files are imported.
+- SKIPPED_DUPLICATE: file hash already imported successfully.
 
 Recommended Folder Lifecycle
 --------------------------------------------------------
@@ -246,11 +269,13 @@ http://localhost/D365_Sharedpoint_csv_import/monitor/
 Security
 --------------------------------------------------------
 
-- SharePoint Read Only
+- SharePoint Read and Move permissions for the configured source and processed folders
 - Admin Login
 - File Hash Validation
 - Duplicate Protection
 - Transaction Rollback
+- Keep CLIENT_SECRET, database passwords, access tokens, and Graph download URLs out of logs.
+- Do not commit config/.env, download/, archive/, error/, logs/, or vendor/.
 
 Recommended Future Improvements
 --------------------------------------------------------
