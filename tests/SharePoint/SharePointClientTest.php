@@ -156,4 +156,53 @@ return [
         }
         assert($calls === 1);
     },
+    'sharepoint client refreshes token and retries once after 401' => function (): void {
+        $tokenRequests = 0;
+        $downloadCalls = [];
+        $http = function (string $method, string $url, array $headers = [], ?string $body = null) use (&$tokenRequests, &$downloadCalls): array {
+            if ($method === 'POST' && str_contains($url, '/oauth2/v2.0/token')) {
+                $tokenRequests++;
+                return [200, [], json_encode(['access_token' => $tokenRequests === 1 ? 'old-token' : 'fresh-token'])];
+            }
+
+            if (str_contains($url, '/sites/contoso.sharepoint.com:/')) {
+                return [200, [], json_encode(['id' => 'site-id'])];
+            }
+
+            if (str_ends_with($url, '/drives')) {
+                return [200, [], json_encode(['value' => [['id' => 'drive-id', 'name' => 'Documents']]])];
+            }
+
+            if (str_contains($url, '/items/item-id/content')) {
+                $downloadCalls[] = $headers[0] ?? '';
+                return count($downloadCalls) === 1
+                    ? [401, [], 'expired']
+                    : [200, [], 'csv-body'];
+            }
+
+            return [500, [], 'unexpected'];
+        };
+
+        $client = SharePointClient::fromEnv([
+            'TENANT_ID' => 'tenant',
+            'CLIENT_ID' => 'client',
+            'CLIENT_SECRET' => 'secret',
+            'SITE_HOST' => 'contoso.sharepoint.com',
+            'SITE_PATH' => '/sites/Finance',
+            'LIBRARY' => 'Documents',
+            'GRAPH_RETRY_DELAY_MS' => '0',
+        ], $http);
+
+        $target = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'token-refresh-' . bin2hex(random_bytes(4)) . '.csv';
+        $client->downloadItem('drive-id', 'item-id', $target);
+
+        assert(file_get_contents($target) === 'csv-body');
+        assert($tokenRequests === 2);
+        assert($downloadCalls === [
+            'Authorization: Bearer old-token',
+            'Authorization: Bearer fresh-token',
+        ]);
+
+        unlink($target);
+    },
 ];

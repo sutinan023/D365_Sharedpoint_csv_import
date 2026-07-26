@@ -11,7 +11,7 @@ final class SharePointClient
     private int $retryDelayMs;
 
     public function __construct(
-        private readonly array $env,
+        private array $env,
         ?callable $http = null,
         ?int $retryAttempts = null,
     )
@@ -183,7 +183,12 @@ final class SharePointClient
 
     private function request(string $method, string $url, array $headers = [], ?string $body = null): array
     {
-        for ($attempt = 1; $attempt <= $this->retryAttempts; $attempt++) {
+        $attempt = 0;
+        $refreshedAfterUnauthorized = false;
+
+        while (true) {
+            $attempt++;
+
             try {
                 $response = ($this->http)($method, $url, $headers, $body);
             } catch (RuntimeException $e) {
@@ -196,6 +201,13 @@ final class SharePointClient
             }
 
             $status = (int) ($response[0] ?? 0);
+            if ($status === 401 && !$refreshedAfterUnauthorized && $this->canRefreshTokenFor($url)) {
+                $this->refreshAccessToken();
+                $headers = $this->replaceAuthorizationHeader($headers);
+                $refreshedAfterUnauthorized = true;
+                continue;
+            }
+
             $transient = $status === 0 || $status === 429 || ($status >= 500 && $status <= 599);
             if (!$transient || $attempt >= $this->retryAttempts) {
                 return $response;
@@ -205,6 +217,37 @@ final class SharePointClient
         }
 
         throw new RuntimeException('HTTP request exhausted configured retry attempts');
+    }
+
+    private function canRefreshTokenFor(string $url): bool
+    {
+        return !str_contains($url, '/oauth2/v2.0/token')
+            && ($this->env['TENANT_ID'] ?? '') !== ''
+            && ($this->env['CLIENT_ID'] ?? '') !== ''
+            && ($this->env['CLIENT_SECRET'] ?? '') !== '';
+    }
+
+    private function refreshAccessToken(): void
+    {
+        $this->env['ACCESS_TOKEN'] = $this->requestAccessToken(
+            $this->env['TENANT_ID'],
+            $this->env['CLIENT_ID'],
+            $this->env['CLIENT_SECRET']
+        );
+    }
+
+    private function replaceAuthorizationHeader(array $headers): array
+    {
+        $authorization = 'Authorization: Bearer ' . ($this->env['ACCESS_TOKEN'] ?? '');
+        foreach ($headers as $index => $header) {
+            if (stripos((string) $header, 'Authorization: Bearer ') === 0) {
+                $headers[$index] = $authorization;
+                return $headers;
+            }
+        }
+
+        $headers[] = $authorization;
+        return $headers;
     }
 
     private function pauseBeforeRetry(int $attempt): void
