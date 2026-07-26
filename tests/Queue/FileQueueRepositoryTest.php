@@ -11,7 +11,7 @@ return [
             ['INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'TEXT', 'TEXT', 'UNIQUE (item_id),', '', '', "DEFAULT CURRENT_TIMESTAMP"],
             file_get_contents(dirname(__DIR__, 2) . '/database/migrations/001_create_sharepoint_file_queue.sql')
         );
-        $pdo->exec(preg_replace('/,\s*\);$/', "\n);", $migration));
+        $pdo->exec(preg_replace('/,\s*\);\s*$/', "\n);", $migration));
 
         $repo = new FileQueueRepository($pdo);
 
@@ -49,7 +49,7 @@ return [
             ['INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'TEXT', 'TEXT', 'UNIQUE (item_id),', '', '', "DEFAULT CURRENT_TIMESTAMP"],
             file_get_contents(dirname(__DIR__, 2) . '/database/migrations/001_create_sharepoint_file_queue.sql')
         );
-        $pdo->exec(preg_replace('/,\s*\);$/', "\n);", $migration));
+        $pdo->exec(preg_replace('/,\s*\);\s*$/', "\n);", $migration));
         $repo = new FileQueueRepository($pdo);
         $id = $repo->upsertDiscovered([
             'drive_id' => 'drive',
@@ -74,7 +74,7 @@ return [
             ['INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'TEXT', 'TEXT', 'UNIQUE (item_id),', '', '', "DEFAULT CURRENT_TIMESTAMP"],
             file_get_contents(dirname(__DIR__, 2) . '/database/migrations/001_create_sharepoint_file_queue.sql')
         );
-        $pdo->exec(preg_replace('/,\s*\);$/', "\n);", $migration));
+        $pdo->exec(preg_replace('/,\s*\);\s*$/', "\n);", $migration));
         $repo = new FileQueueRepository($pdo);
 
         foreach ([
@@ -109,7 +109,7 @@ return [
             ['INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'TEXT', 'TEXT', 'UNIQUE (item_id),', '', '', "DEFAULT CURRENT_TIMESTAMP"],
             file_get_contents(dirname(__DIR__, 2) . '/database/migrations/001_create_sharepoint_file_queue.sql')
         );
-        $pdo->exec(preg_replace('/,\s*\);$/', "\n);", $migration));
+        $pdo->exec(preg_replace('/,\s*\);\s*$/', "\n);", $migration));
         $repo = new FileQueueRepository($pdo);
 
         $older = $repo->upsertDiscovered([
