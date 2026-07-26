@@ -10,6 +10,7 @@ $files = [
     __DIR__ . '/SharePoint/DownloadQueueTest.php',
     __DIR__ . '/Import/PaymentBeforePostImporterTest.php',
     __DIR__ . '/Import/ImportQueueTest.php',
+    __DIR__ . '/Maintenance/DownloadCleanupTest.php',
     __DIR__ . '/Support/PipelineLockTest.php',
     __DIR__ . '/Monitor/MonitorQueryTest.php',
 ];
