@@ -69,7 +69,28 @@ final class FileQueueRepository
     {
         $stmt = $this->pdo->query(
             "SELECT * FROM sharepoint_file_queue
-             WHERE status = 'MOVED'
+             WHERE status IN ('MOVED', 'IMPORT_ERROR')
+             ORDER BY sharepoint_last_modified_at ASC, id ASC"
+        );
+
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    public function recoverInterruptedImports(): void
+    {
+        $this->pdo->exec(
+            "UPDATE sharepoint_file_queue
+             SET status = 'MOVED', last_error = NULL, updated_at = CURRENT_TIMESTAMP
+             WHERE status = 'IMPORTING'"
+        );
+    }
+
+    public function findPendingMoves(): array
+    {
+        $stmt = $this->pdo->query(
+            "SELECT * FROM sharepoint_file_queue
+             WHERE status IN ('DOWNLOADED', 'MOVING')
+                OR (status = 'ERROR' AND local_path IS NOT NULL AND local_sha256 IS NOT NULL)
              ORDER BY sharepoint_last_modified_at ASC, id ASC"
         );
 
@@ -80,17 +101,25 @@ final class FileQueueRepository
     {
         $stmt = $this->pdo->prepare(
             'UPDATE sharepoint_file_queue
-             SET status = :status, last_error = :error, attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP
+             SET status = :status, last_error = :error,
+                 attempt_count = attempt_count + :attempt_increment,
+                 updated_at = CURRENT_TIMESTAMP
              WHERE id = :id'
         );
-        $stmt->execute([':status' => $status, ':error' => $error, ':id' => $id]);
+        $stmt->execute([
+            ':status' => $status,
+            ':error' => $error,
+            ':attempt_increment' => $error === null ? 0 : 1,
+            ':id' => $id,
+        ]);
     }
 
     public function markDownloaded(int $id, string $localPath, string $sha256): void
     {
         $stmt = $this->pdo->prepare(
             "UPDATE sharepoint_file_queue
-             SET status = 'DOWNLOADED', local_path = :local_path, local_sha256 = :sha256, downloaded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             SET status = 'DOWNLOADED', local_path = :local_path, local_sha256 = :sha256,
+                 last_error = NULL, downloaded_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE id = :id"
         );
         $stmt->execute([':local_path' => $localPath, ':sha256' => $sha256, ':id' => $id]);
@@ -100,7 +129,7 @@ final class FileQueueRepository
     {
         $stmt = $this->pdo->prepare(
             "UPDATE sharepoint_file_queue
-             SET status = 'MOVED', moved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             SET status = 'MOVED', last_error = NULL, moved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE id = :id"
         );
         $stmt->execute([':id' => $id]);
@@ -110,7 +139,7 @@ final class FileQueueRepository
     {
         $stmt = $this->pdo->prepare(
             "UPDATE sharepoint_file_queue
-             SET status = 'IMPORTED', imported_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             SET status = 'IMPORTED', last_error = NULL, imported_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE id = :id"
         );
         $stmt->execute([':id' => $id]);
@@ -120,7 +149,8 @@ final class FileQueueRepository
     {
         $stmt = $this->pdo->prepare(
             "UPDATE sharepoint_file_queue
-             SET status = 'SKIPPED_DUPLICATE', local_sha256 = :sha256, imported_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             SET status = 'SKIPPED_DUPLICATE', local_sha256 = :sha256, last_error = NULL,
+                 imported_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
              WHERE id = :id"
         );
         $stmt->execute([':sha256' => $sha256, ':id' => $id]);

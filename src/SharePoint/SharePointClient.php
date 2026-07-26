@@ -7,15 +7,23 @@ use RuntimeException;
 final class SharePointClient
 {
     private $http;
+    private int $retryAttempts;
+    private int $retryDelayMs;
 
-    public function __construct(private readonly array $env, ?callable $http = null)
+    public function __construct(
+        private readonly array $env,
+        ?callable $http = null,
+        ?int $retryAttempts = null,
+    )
     {
         $this->http = $http ?? [$this, 'curlRequest'];
+        $this->retryAttempts = max(1, $retryAttempts ?? (int) ($env['GRAPH_RETRY_ATTEMPTS'] ?? 3));
+        $this->retryDelayMs = max(0, min(60000, (int) ($env['GRAPH_RETRY_DELAY_MS'] ?? 250)));
     }
 
-    public static function fromEnv(array $env, ?callable $http = null): self
+    public static function fromEnv(array $env, ?callable $http = null, ?int $retryAttempts = null): self
     {
-        $client = new self($env, $http);
+        $client = new self($env, $http, $retryAttempts);
         $token = $client->requestAccessToken(
             $env['TENANT_ID'] ?? '',
             $env['CLIENT_ID'] ?? '',
@@ -28,7 +36,7 @@ final class SharePointClient
             'ACCESS_TOKEN' => $token,
             'SITE_ID' => $siteId,
             'DRIVE_ID' => $driveId,
-        ]), $http);
+        ]), $http, $retryAttempts);
     }
 
     public function listCsvFiles(string $folderPath): array
@@ -43,7 +51,7 @@ final class SharePointClient
         $files = [];
 
         while ($url !== null) {
-            [$status, , $body] = ($this->http)('GET', $url, $this->headers());
+            [$status, , $body] = $this->request('GET', $url, $this->headers());
             if ($status < 200 || $status >= 300) {
                 throw new RuntimeException("Graph list children failed with HTTP {$status}");
             }
@@ -72,7 +80,7 @@ final class SharePointClient
 
         $encoded = implode('/', array_map('rawurlencode', explode('/', trim($folderPath, '/'))));
         $url = "https://graph.microsoft.com/v1.0/drives/{$driveId}/root:/{$encoded}";
-        [$status, , $body] = ($this->http)('GET', $url, $this->headers());
+        [$status, , $body] = $this->request('GET', $url, $this->headers());
         if ($status < 200 || $status >= 300) {
             throw new RuntimeException("Graph resolve folder failed with HTTP {$status}");
         }
@@ -84,7 +92,7 @@ final class SharePointClient
     public function downloadItem(string $driveId, string $itemId, string $targetPath): void
     {
         $url = "https://graph.microsoft.com/v1.0/drives/{$driveId}/items/{$itemId}/content";
-        [$status, , $body] = ($this->http)('GET', $url, $this->headers());
+        [$status, , $body] = $this->request('GET', $url, $this->headers());
         if ($status < 200 || $status >= 300) {
             throw new RuntimeException("Graph download failed with HTTP {$status}");
         }
@@ -99,7 +107,7 @@ final class SharePointClient
     {
         $url = "https://graph.microsoft.com/v1.0/drives/{$driveId}/items/{$itemId}";
         $body = json_encode(['parentReference' => ['id' => $processedFolderItemId]], JSON_THROW_ON_ERROR);
-        [$status] = ($this->http)('PATCH', $url, array_merge($this->headers(), ['Content-Type: application/json']), $body);
+        [$status] = $this->request('PATCH', $url, array_merge($this->headers(), ['Content-Type: application/json']), $body);
         if ($status < 200 || $status >= 300) {
             throw new RuntimeException("Graph move failed with HTTP {$status}");
         }
@@ -125,7 +133,7 @@ final class SharePointClient
             'grant_type' => 'client_credentials',
         ]);
 
-        [$status, , $response] = ($this->http)('POST', $url, ['Content-Type: application/x-www-form-urlencoded'], $body);
+        [$status, , $response] = $this->request('POST', $url, ['Content-Type: application/x-www-form-urlencoded'], $body);
         if ($status < 200 || $status >= 300) {
             throw new RuntimeException("Graph token request failed with HTTP {$status}");
         }
@@ -142,7 +150,7 @@ final class SharePointClient
 
         $encodedPath = implode('/', array_map('rawurlencode', explode('/', trim($sitePath, '/'))));
         $url = 'https://graph.microsoft.com/v1.0/sites/' . rawurlencode($siteHost) . ':/' . $encodedPath;
-        [$status, , $response] = ($this->http)('GET', $url, ['Authorization: Bearer ' . $token]);
+        [$status, , $response] = $this->request('GET', $url, ['Authorization: Bearer ' . $token]);
         if ($status < 200 || $status >= 300) {
             throw new RuntimeException("Graph site resolve failed with HTTP {$status}");
         }
@@ -158,7 +166,7 @@ final class SharePointClient
         }
 
         $url = "https://graph.microsoft.com/v1.0/sites/{$siteId}/drives";
-        [$status, , $response] = ($this->http)('GET', $url, ['Authorization: Bearer ' . $token]);
+        [$status, , $response] = $this->request('GET', $url, ['Authorization: Bearer ' . $token]);
         if ($status < 200 || $status >= 300) {
             throw new RuntimeException("Graph drive resolve failed with HTTP {$status}");
         }
@@ -173,6 +181,39 @@ final class SharePointClient
         throw new RuntimeException("SharePoint library not found: {$libraryName}");
     }
 
+    private function request(string $method, string $url, array $headers = [], ?string $body = null): array
+    {
+        for ($attempt = 1; $attempt <= $this->retryAttempts; $attempt++) {
+            try {
+                $response = ($this->http)($method, $url, $headers, $body);
+            } catch (RuntimeException $e) {
+                if ($attempt >= $this->retryAttempts) {
+                    throw $e;
+                }
+
+                $this->pauseBeforeRetry($attempt);
+                continue;
+            }
+
+            $status = (int) ($response[0] ?? 0);
+            $transient = $status === 0 || $status === 429 || ($status >= 500 && $status <= 599);
+            if (!$transient || $attempt >= $this->retryAttempts) {
+                return $response;
+            }
+
+            $this->pauseBeforeRetry($attempt);
+        }
+
+        throw new RuntimeException('HTTP request exhausted configured retry attempts');
+    }
+
+    private function pauseBeforeRetry(int $attempt): void
+    {
+        if ($this->retryDelayMs > 0) {
+            usleep($this->retryDelayMs * $attempt * 1000);
+        }
+    }
+
     private function curlRequest(string $method, string $url, array $headers = [], ?string $body = null): array
     {
         $ch = curl_init($url);
@@ -181,6 +222,8 @@ final class SharePointClient
             CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_CUSTOMREQUEST => $method,
             CURLOPT_HTTPHEADER => $headers,
+            CURLOPT_CONNECTTIMEOUT => max(1, (int) ($this->env['GRAPH_CONNECT_TIMEOUT_SECONDS'] ?? 10)),
+            CURLOPT_TIMEOUT => max(1, (int) ($this->env['GRAPH_TIMEOUT_SECONDS'] ?? 60)),
         ]);
         if ($body !== null) {
             curl_setopt($ch, CURLOPT_POSTFIELDS, $body);

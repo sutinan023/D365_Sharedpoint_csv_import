@@ -12,7 +12,13 @@ final class ImportQueue
 
     public function run(): void
     {
+        $this->repo->recoverInterruptedImports();
+
         foreach ($this->repo->findReadyForImport() as $row) {
+            if (($row['status'] ?? 'MOVED') !== 'MOVED') {
+                break;
+            }
+
             $id = (int) $row['id'];
             $path = $row['local_path'];
             $sha256 = $row['local_sha256'] ?? (is_file($path) ? hash_file('sha256', $path) : '');

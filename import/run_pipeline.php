@@ -32,7 +32,7 @@ $lock->run(function () use ($config, $logger, $pdo): void {
     $logger->info('Pipeline started');
 
     $repo = new FileQueueRepository($pdo);
-    $client = SharePointClient::fromEnv($_ENV);
+    $client = SharePointClient::fromEnv($_ENV, retryAttempts: $config->retryAttempts);
     $downloadQueue = new DownloadQueue($client, $repo, $config);
     $importer = new PaymentBeforePostImporter($pdo, $config->archiveDir);
     $importQueue = new ImportQueue($repo, $importer);

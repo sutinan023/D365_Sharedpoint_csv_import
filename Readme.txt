@@ -64,8 +64,9 @@ TENANT_ID=
 CLIENT_ID=
 CLIENT_SECRET=
 
-SHAREPOINT_SITE=
-SHAREPOINT_FOLDER=
+SITE_HOST=
+SITE_PATH=
+LIBRARY=
 
 # Queue pipeline settings (see config/.env.example for defaults)
 CSV_FOLDER=PaymentBeforePost

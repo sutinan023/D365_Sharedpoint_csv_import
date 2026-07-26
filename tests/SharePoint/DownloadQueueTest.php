@@ -54,6 +54,8 @@ return [
             public array $moved = [];
             public array $statuses = [];
             public array $events = [];
+            public function findPendingMoves(): array { return []; }
+            public function findByItemId(string $itemId): ?array { return null; }
             public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int { return $this->id; }
             public function markStatus(int $id, string $status, ?string $error = null): void { $this->statuses[] = [$id, $status, $error]; $this->events[] = $status; }
             public function markDownloaded(int $id, string $localPath, string $sha256): void { $this->downloaded[] = [$id, $localPath, $sha256]; $this->events[] = 'DOWNLOADED'; }
@@ -82,6 +84,8 @@ return [
         $repo = new class {
             public array $statuses = [];
             public array $downloaded = [];
+            public function findPendingMoves(): array { return []; }
+            public function findByItemId(string $itemId): ?array { return null; }
             public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int { return 20; }
             public function markStatus(int $id, string $status, ?string $error = null): void { $this->statuses[] = [$status, $error]; }
             public function markDownloaded(int $id, string $localPath, string $sha256): void { $this->downloaded[] = [$localPath, $sha256]; }
@@ -110,6 +114,8 @@ return [
             public array $statuses = [];
             public array $downloaded = [];
             public array $moved = [];
+            public function findPendingMoves(): array { return []; }
+            public function findByItemId(string $itemId): ?array { return null; }
             public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int { return 30; }
             public function markStatus(int $id, string $status, ?string $error = null): void { $this->statuses[] = [$status, $error]; }
             public function markDownloaded(int $id, string $localPath, string $sha256): void { $this->downloaded[] = [$localPath, $sha256]; }
@@ -123,7 +129,7 @@ return [
         assert(!is_file($finalPath . '.part'));
         assert($repo->downloaded === [[$finalPath, hash_file('sha256', $finalPath)]]);
         assert($repo->moved === []);
-        assert(array_column($repo->statuses, 0) === ['DOWNLOADING', 'MOVING', 'ERROR']);
+        assert(array_column($repo->statuses, 0) === ['DOWNLOADING', 'MOVING', 'MOVING']);
     },
     'download queue preserves existing original and fallback CSV names' => function (): void {
         $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);
@@ -140,6 +146,8 @@ return [
         };
         $repo = new class {
             public array $downloaded = [];
+            public function findPendingMoves(): array { return []; }
+            public function findByItemId(string $itemId): ?array { return null; }
             public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int { return 40; }
             public function markStatus(int $id, string $status, ?string $error = null): void {}
             public function markDownloaded(int $id, string $localPath, string $sha256): void { $this->downloaded[] = $localPath; }
@@ -152,5 +160,130 @@ return [
         assert(file_get_contents($downloadDir . DIRECTORY_SEPARATOR . 'first_item4.csv') === 'fallback');
         assert($repo->downloaded === [$downloadDir . DIRECTORY_SEPARATOR . 'first_item4_2.csv']);
         assert(file_get_contents($repo->downloaded[0]) === '12345');
+    },
+    'download queue resumes a failed move on the next run without redownloading' => function (): void {
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);
+        mkdir($root . DIRECTORY_SEPARATOR . 'download', 0777, true);
+        $config = downloadQueueConfig($root);
+        $client = new class {
+            public int $downloads = 0;
+            public int $moves = 0;
+            public function listCsvFiles(string $folder): array { return [downloadQueueItem('recover-item')]; }
+            public function resolveFolderItemId(string $folder): string { return 'processed-folder-id'; }
+            public function downloadItem(string $driveId, string $itemId, string $targetPath): void {
+                $this->downloads++;
+                file_put_contents($targetPath, '12345');
+            }
+            public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void {
+                $this->moves++;
+                if ($this->moves === 1) {
+                    throw new RuntimeException('temporary move failure');
+                }
+            }
+        };
+        $repo = new class {
+            public ?array $row = null;
+            public function findPendingMoves(): array {
+                if ($this->row === null) {
+                    return [];
+                }
+                $recoverable = in_array($this->row['status'], ['DOWNLOADED', 'MOVING'], true)
+                    || ($this->row['status'] === 'ERROR' && $this->row['local_path'] !== null);
+                return $recoverable ? [$this->row] : [];
+            }
+            public function findByItemId(string $itemId): ?array { return $this->row; }
+            public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int {
+                $this->row ??= [
+                    'id' => 50,
+                    'drive_id' => $item['drive_id'],
+                    'item_id' => $item['id'],
+                    'status' => 'DISCOVERED',
+                    'local_path' => null,
+                    'local_sha256' => null,
+                ];
+                return 50;
+            }
+            public function markStatus(int $id, string $status, ?string $error = null): void {
+                $this->row['status'] = $status;
+                $this->row['last_error'] = $error;
+            }
+            public function markDownloaded(int $id, string $localPath, string $sha256): void {
+                $this->row['status'] = 'DOWNLOADED';
+                $this->row['local_path'] = $localPath;
+                $this->row['local_sha256'] = $sha256;
+            }
+            public function markMoved(int $id): void { $this->row['status'] = 'MOVED'; }
+        };
+
+        (new DownloadQueue($client, $repo, $config))->run();
+        (new DownloadQueue($client, $repo, $config))->run();
+
+        assert($client->downloads === 1);
+        assert($client->moves === 2);
+        assert($repo->row['status'] === 'MOVED');
+    },
+    'download queue does not move remote item when local rename fails' => function (): void {
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);
+        mkdir($root . DIRECTORY_SEPARATOR . 'download', 0777, true);
+        $config = downloadQueueConfig($root);
+        $client = new class {
+            public int $moves = 0;
+            public function listCsvFiles(string $folder): array { return [downloadQueueItem('rename-item')]; }
+            public function resolveFolderItemId(string $folder): string { return 'processed-folder-id'; }
+            public function downloadItem(string $driveId, string $itemId, string $targetPath): void { file_put_contents($targetPath, '12345'); }
+            public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void { $this->moves++; }
+        };
+        $repo = new class {
+            public array $statuses = [];
+            public function findPendingMoves(): array { return []; }
+            public function findByItemId(string $itemId): ?array { return null; }
+            public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int { return 60; }
+            public function markStatus(int $id, string $status, ?string $error = null): void { $this->statuses[] = [$status, $error]; }
+            public function markDownloaded(int $id, string $localPath, string $sha256): void {}
+            public function markMoved(int $id): void {}
+        };
+
+        (new DownloadQueue(
+            $client,
+            $repo,
+            $config,
+            static fn (string $from, string $to): bool => false,
+            static fn (string $path): string => str_repeat('a', 64),
+        ))->run();
+
+        assert($client->moves === 0);
+        assert(array_column($repo->statuses, 0) === ['DOWNLOADING', 'ERROR']);
+    },
+    'download queue does not move remote item when local hashing fails' => function (): void {
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);
+        mkdir($root . DIRECTORY_SEPARATOR . 'download', 0777, true);
+        $config = downloadQueueConfig($root);
+        $client = new class {
+            public int $moves = 0;
+            public function listCsvFiles(string $folder): array { return [downloadQueueItem('hash-item')]; }
+            public function resolveFolderItemId(string $folder): string { return 'processed-folder-id'; }
+            public function downloadItem(string $driveId, string $itemId, string $targetPath): void { file_put_contents($targetPath, '12345'); }
+            public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void { $this->moves++; }
+        };
+        $repo = new class {
+            public array $statuses = [];
+            public function findPendingMoves(): array { return []; }
+            public function findByItemId(string $itemId): ?array { return null; }
+            public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int { return 70; }
+            public function markStatus(int $id, string $status, ?string $error = null): void { $this->statuses[] = [$status, $error]; }
+            public function markDownloaded(int $id, string $localPath, string $sha256): void {}
+            public function markMoved(int $id): void {}
+        };
+
+        (new DownloadQueue(
+            $client,
+            $repo,
+            $config,
+            static fn (string $from, string $to): bool => rename($from, $to),
+            static fn (string $path): bool => false,
+        ))->run();
+
+        assert($client->moves === 0);
+        assert(array_column($repo->statuses, 0) === ['DOWNLOADING', 'ERROR']);
     },
 ];

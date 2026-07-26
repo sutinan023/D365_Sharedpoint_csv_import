@@ -96,4 +96,64 @@ return [
         assert(array_column($files, 'name') === ['A.csv', 'C.CSV']);
         assert(count($calls) === 2);
     },
+    'sharepoint client retries transient HTTP responses up to configured attempts' => function (): void {
+        $calls = 0;
+        $http = static function () use (&$calls): array {
+            $calls++;
+            return match ($calls) {
+                1 => [429, [], 'rate limited'],
+                2 => [503, [], 'unavailable'],
+                default => [200, [], json_encode(['value' => []])],
+            };
+        };
+        $client = new SharePointClient([
+            'DRIVE_ID' => 'drive',
+            'ACCESS_TOKEN' => 'test-token',
+            'GRAPH_RETRY_ATTEMPTS' => '3',
+            'GRAPH_RETRY_DELAY_MS' => '0',
+        ], $http);
+
+        assert($client->listCsvFiles('PaymentBeforePost') === []);
+        assert($calls === 3);
+    },
+    'sharepoint client retries transient transport exceptions' => function (): void {
+        $calls = 0;
+        $http = static function () use (&$calls): array {
+            $calls++;
+            if ($calls === 1) {
+                throw new RuntimeException('connection reset');
+            }
+
+            return [200, [], json_encode(['value' => []])];
+        };
+        $client = new SharePointClient([
+            'DRIVE_ID' => 'drive',
+            'ACCESS_TOKEN' => 'test-token',
+            'GRAPH_RETRY_ATTEMPTS' => '2',
+            'GRAPH_RETRY_DELAY_MS' => '0',
+        ], $http);
+
+        assert($client->listCsvFiles('PaymentBeforePost') === []);
+        assert($calls === 2);
+    },
+    'sharepoint client does not retry non transient HTTP responses' => function (): void {
+        $calls = 0;
+        $client = new SharePointClient([
+            'DRIVE_ID' => 'drive',
+            'ACCESS_TOKEN' => 'test-token',
+            'GRAPH_RETRY_ATTEMPTS' => '3',
+            'GRAPH_RETRY_DELAY_MS' => '0',
+        ], static function () use (&$calls): array {
+            $calls++;
+            return [400, [], 'bad request'];
+        });
+
+        try {
+            $client->listCsvFiles('PaymentBeforePost');
+            assert(false, 'Expected non-transient response to fail');
+        } catch (RuntimeException $exception) {
+            assert($exception->getMessage() === 'Graph list children failed with HTTP 400');
+        }
+        assert($calls === 1);
+    },
 ];
