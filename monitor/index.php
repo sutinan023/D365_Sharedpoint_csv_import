@@ -115,14 +115,14 @@ $queueLatestStmt = $pdo->query("
 ");
 $queueLatestFiles = $queueLatestStmt->fetchAll(PDO::FETCH_ASSOC);
 
-$oldestBlockingErrorStmt = $pdo->query("
-    SELECT file_name, last_error, updated_at
+$oldestBlockingQueueRowStmt = $pdo->query("
+    SELECT file_name, status, last_error, updated_at
     FROM sharepoint_file_queue
-    WHERE status IN ('IMPORT_ERROR', 'RECOVERY_ERROR')
+    WHERE status IN ('IMPORT_ERROR', 'RECOVERY_ERROR', 'RECOVERY_DOWNLOADING')
     ORDER BY sharepoint_last_modified_at ASC, id ASC
     LIMIT 1
 ");
-$oldestBlockingError = $oldestBlockingErrorStmt->fetch(PDO::FETCH_ASSOC);
+$oldestBlockingQueueRow = $oldestBlockingQueueRowStmt->fetch(PDO::FETCH_ASSOC);
 
 $workflowSummary = $pdo->query("
     SELECT
@@ -242,10 +242,11 @@ $duplicateVoucher = $pdo->query("
         </div>
     </div>
 
-    <?php if ($oldestBlockingError): ?>
+    <?php if ($oldestBlockingQueueRow): ?>
         <div class="alert alert-danger">
-            Oldest blocking error: <?= htmlspecialchars($oldestBlockingError['file_name']) ?>
-            <?= htmlspecialchars($oldestBlockingError['last_error'] ?? '') ?>
+            Oldest blocking queue row: <?= htmlspecialchars($oldestBlockingQueueRow['file_name']) ?>
+            (<?= htmlspecialchars($oldestBlockingQueueRow['status']) ?>)
+            <?= htmlspecialchars($oldestBlockingQueueRow['last_error'] ?? '') ?>
         </div>
     <?php endif; ?>
 

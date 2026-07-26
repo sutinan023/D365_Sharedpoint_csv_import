@@ -52,10 +52,14 @@ final class DownloadQueue
             $finalizedPath = null;
             $downloadRecorded = false;
             $moving = false;
-            $recoveryRedownload = ($existing['status'] ?? '') === 'RECOVERY_ERROR';
+            $recoveryRedownload = in_array(
+                $existing['status'] ?? '',
+                ['RECOVERY_ERROR', 'RECOVERY_DOWNLOADING'],
+                true
+            );
 
             try {
-                $this->repo->markStatus($id, 'DOWNLOADING');
+                $this->repo->markStatus($id, $recoveryRedownload ? 'RECOVERY_DOWNLOADING' : 'DOWNLOADING');
                 if (is_file($partPath)) {
                     unlink($partPath);
                 }
@@ -142,7 +146,11 @@ final class DownloadQueue
             return true;
         }
 
-        if (in_array($existing['status'] ?? '', ['DISCOVERED', 'DOWNLOADING'], true)) {
+        if (in_array(
+            $existing['status'] ?? '',
+            ['DISCOVERED', 'DOWNLOADING', 'RECOVERY_DOWNLOADING'],
+            true
+        )) {
             return true;
         }
 

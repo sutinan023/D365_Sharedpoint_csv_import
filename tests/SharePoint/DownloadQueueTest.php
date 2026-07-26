@@ -387,7 +387,7 @@ return [
         assert($repo->row['status'] === 'RECOVERY_ERROR');
         assert(str_contains($repo->row['last_error'], 'redownload'));
     },
-    'failed recovery redownload remains blocking and prevents a newer import' => function (): void {
+    'recovery redownload provenance survives a process stop and blocks a newer import' => function (): void {
         [$pdo, $repo] = downloadQueueRepository();
         $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'download_queue_' . uniqid('', true);
         mkdir($root . DIRECTORY_SEPARATOR . 'download', 0777, true);
@@ -415,7 +415,54 @@ return [
         $repo->markDownloaded($newer, $newPath, hash_file('sha256', $newPath));
         $repo->markMoved($newer);
 
-        $client = new class {
+        $stoppingRepo = new class ($repo) {
+            private bool $stopped = false;
+            public function __construct(private readonly FileQueueRepository $repo) {}
+            public function findPendingMoves(): array { return $this->repo->findPendingMoves(); }
+            public function findByItemId(string $itemId): ?array { return $this->repo->findByItemId($itemId); }
+            public function upsertDiscovered(array $item, string $sourceFolder, string $processedFolder): int {
+                return $this->repo->upsertDiscovered($item, $sourceFolder, $processedFolder);
+            }
+            public function markStatus(int $id, string $status, ?string $error = null): void {
+                if ($this->stopped) {
+                    throw new RuntimeException('simulated process stop');
+                }
+                $this->repo->markStatus($id, $status, $error);
+                $this->stopped = true;
+                throw new RuntimeException('simulated process stop');
+            }
+            public function markDownloaded(int $id, string $localPath, string $sha256): void {
+                $this->repo->markDownloaded($id, $localPath, $sha256);
+            }
+            public function markMoved(int $id): void { $this->repo->markMoved($id); }
+            public function resetForRedownload(int $id, string $error): void {
+                $this->repo->resetForRedownload($id, $error);
+            }
+        };
+        $stoppedClient = new class {
+            public function listCsvFiles(string $folder): array {
+                return [downloadQueueItem('recovery-redownload')];
+            }
+            public function resolveFolderItemId(string $folder): string { return 'processed-folder-id'; }
+            public function downloadItem(string $driveId, string $itemId, string $targetPath): void {
+                throw new RuntimeException('download must not start after the simulated stop');
+            }
+            public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void {}
+        };
+
+        try {
+            (new DownloadQueue($stoppedClient, $stoppingRepo, $config))->run();
+            assert(false, 'The simulated process stop must escape the queue run');
+        } catch (RuntimeException $e) {
+            assert($e->getMessage() === 'simulated process stop');
+        }
+        assert($repo->findByItemId('recovery-redownload')['status'] === 'RECOVERY_DOWNLOADING');
+        assert(array_column($repo->findReadyForImport(), 'item_id') === [
+            'recovery-redownload',
+            'newer-ready',
+        ]);
+
+        $failingClient = new class {
             public function listCsvFiles(string $folder): array {
                 return [downloadQueueItem('recovery-redownload')];
             }
@@ -425,7 +472,7 @@ return [
             }
             public function moveItem(string $driveId, string $itemId, string $processedFolderItemId): void {}
         };
-        (new DownloadQueue($client, $repo, $config))->run();
+        (new DownloadQueue($failingClient, $repo, $config))->run();
 
         $importer = new class {
             public array $called = [];

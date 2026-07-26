@@ -71,7 +71,7 @@ final class FileQueueRepository
             "SELECT * FROM sharepoint_file_queue
              WHERE status IN (
                  'MOVED', 'IMPORT_ERROR', 'RECOVERY_ERROR',
-                 'DOWNLOADED', 'MOVING', 'IMPORTING'
+                 'DOWNLOADED', 'MOVING', 'IMPORTING', 'RECOVERY_DOWNLOADING'
              )
              ORDER BY sharepoint_last_modified_at ASC, id ASC"
         );
