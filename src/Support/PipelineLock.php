@@ -28,20 +28,14 @@ final class PipelineLock
         }
 
         try {
+            ftruncate($handle, 0);
+            rewind($handle);
             fwrite($handle, (string) getmypid());
-            $result = $callback();
-            flock($handle, LOCK_UN);
-            fclose($handle);
-            unlink($this->lockFile);
 
-            return $result;
-        } catch (\Throwable $e) {
+            return $callback();
+        } finally {
             flock($handle, LOCK_UN);
             fclose($handle);
-            if (is_file($this->lockFile)) {
-                unlink($this->lockFile);
-            }
-            throw $e;
         }
     }
 }
