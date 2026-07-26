@@ -240,6 +240,8 @@ Recovery:
 - DOWNLOADED: retry SharePoint move.
 - MOVED: ready for local import.
 - IMPORT_ERROR: fix the CSV or data issue before newer files are imported.
+- RECOVERY_ERROR: an interrupted move/import could not be reconciled. Restore the named local/archive file
+  or return the SharePoint item to the source folder; this oldest unresolved row blocks newer imports.
 - SKIPPED_DUPLICATE: file hash already imported successfully.
 
 Recommended Folder Lifecycle

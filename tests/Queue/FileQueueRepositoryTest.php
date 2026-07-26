@@ -101,4 +101,40 @@ return [
             'legacy-move-error',
         ]);
     },
+    'repository clears invalid local metadata and keeps recovery error ahead of newer moved files' => function (): void {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $migration = str_replace(
+            ['INT AUTO_INCREMENT PRIMARY KEY', 'BIGINT', 'DATETIME', 'TEXT', 'UNIQUE KEY uq_sharepoint_file_queue_item_id (item_id),', 'KEY idx_sharepoint_file_queue_status_modified (status, sharepoint_last_modified_at),', 'KEY idx_sharepoint_file_queue_sha256 (local_sha256)', 'DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP'],
+            ['INTEGER PRIMARY KEY AUTOINCREMENT', 'INTEGER', 'TEXT', 'TEXT', 'UNIQUE (item_id),', '', '', "DEFAULT CURRENT_TIMESTAMP"],
+            file_get_contents(dirname(__DIR__, 2) . '/database/migrations/001_create_sharepoint_file_queue.sql')
+        );
+        $pdo->exec(preg_replace('/,\s*\);$/', "\n);", $migration));
+        $repo = new FileQueueRepository($pdo);
+
+        $older = $repo->upsertDiscovered([
+            'drive_id' => 'drive',
+            'id' => 'missing-old',
+            'name' => 'missing-old.csv',
+            'lastModifiedDateTime' => '2026-07-24T01:00:00Z',
+        ], 'PaymentBeforePost', 'PaymentBeforePost_Downloaded');
+        $repo->markDownloaded($older, 'C:\\queue\\missing-old.csv', str_repeat('a', 64));
+        $repo->resetForRedownload($older, 'Downloaded local file is missing; redownload required');
+
+        $newer = $repo->upsertDiscovered([
+            'drive_id' => 'drive',
+            'id' => 'ready-new',
+            'name' => 'ready-new.csv',
+            'lastModifiedDateTime' => '2026-07-24T02:00:00Z',
+        ], 'PaymentBeforePost', 'PaymentBeforePost_Downloaded');
+        $repo->markMoved($newer);
+
+        $olderRow = $repo->findByItemId('missing-old');
+        $ready = $repo->findReadyForImport();
+
+        assert($olderRow['status'] === 'RECOVERY_ERROR');
+        assert($olderRow['local_path'] === null);
+        assert($olderRow['local_sha256'] === null);
+        assert(array_column($ready, 'item_id') === ['missing-old', 'ready-new']);
+    },
 ];

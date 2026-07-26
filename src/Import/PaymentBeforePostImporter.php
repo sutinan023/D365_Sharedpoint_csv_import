@@ -22,6 +22,65 @@ final class PaymentBeforePostImporter
         return (int)$stmt->fetchColumn() > 0;
     }
 
+    public function reconcileInterruptedImport(array $row): array
+    {
+        $localPath = (string) ($row['local_path'] ?? '');
+        $fileName = basename((string) ($row['file_name'] ?? $localPath));
+        $sha256 = (string) ($row['local_sha256'] ?? '');
+        $importStatus = $sha256 === '' ? null : $this->findImportStatus($sha256);
+
+        if ($importStatus === 'SUCCESS') {
+            return ['action' => 'IMPORTED', 'message' => null];
+        }
+
+        if ($importStatus === 'PENDING_ARCHIVE') {
+            if ($localPath !== '' && is_file($localPath)) {
+                $actualHash = hash_file('sha256', $localPath);
+                if ($actualHash === false || $sha256 === '' || !hash_equals($sha256, $actualHash)) {
+                    return [
+                        'action' => 'BLOCKED',
+                        'message' => 'Interrupted import is PENDING_ARCHIVE, but the local file hash cannot be verified',
+                    ];
+                }
+
+                if (!is_dir($this->archiveDir)
+                    && !mkdir($this->archiveDir, 0777, true)
+                    && !is_dir($this->archiveDir)
+                ) {
+                    return [
+                        'action' => 'BLOCKED',
+                        'message' => "Interrupted import is PENDING_ARCHIVE, but the archive directory cannot be created: {$this->archiveDir}",
+                    ];
+                }
+
+                $this->archiveFile($localPath, $fileName);
+                $this->markImportSuccessful($sha256);
+
+                return ['action' => 'IMPORTED', 'message' => null];
+            }
+
+            if ($this->findArchivedFile($fileName, $sha256) !== null) {
+                $this->markImportSuccessful($sha256);
+
+                return ['action' => 'IMPORTED', 'message' => null];
+            }
+
+            return [
+                'action' => 'BLOCKED',
+                'message' => "Interrupted import is PENDING_ARCHIVE, but the local CSV is missing and no matching archive was found for {$fileName}",
+            ];
+        }
+
+        if ($localPath !== '' && is_file($localPath)) {
+            return ['action' => 'RETRY', 'message' => null];
+        }
+
+        return [
+            'action' => 'BLOCKED',
+            'message' => "Interrupted import cannot be retried because the local CSV is missing: {$localPath}",
+        ];
+    }
+
     public function importFile(string $filePath, ?int $queueId = null): string
     {
         // Reserved for queue status updates when importer execution is linked to queue records.
@@ -200,6 +259,52 @@ final class PaymentBeforePostImporter
         }
 
         return $archivePath;
+    }
+
+    private function findImportStatus(string $sha256): ?string
+    {
+        try {
+            $stmt = $this->pdo->prepare('SELECT status FROM import_files WHERE file_hash = :hash LIMIT 1');
+            $stmt->execute([':hash' => $sha256]);
+            $status = $stmt->fetchColumn();
+
+            return $status === false ? null : (string) $status;
+        } catch (\Throwable) {
+            return null;
+        }
+    }
+
+    private function markImportSuccessful(string $sha256): void
+    {
+        $stmt = $this->pdo->prepare(
+            "UPDATE import_files SET status = 'SUCCESS' WHERE file_hash = :hash AND status = 'PENDING_ARCHIVE'"
+        );
+        $stmt->execute([':hash' => $sha256]);
+    }
+
+    private function findArchivedFile(string $fileName, string $sha256): ?string
+    {
+        if ($fileName === '' || $sha256 === '' || !is_dir($this->archiveDir)) {
+            return null;
+        }
+
+        foreach (scandir($this->archiveDir) ?: [] as $entry) {
+            if ($entry === '.' || $entry === '..' || !str_ends_with($entry, '_' . $fileName)) {
+                continue;
+            }
+
+            $candidate = rtrim($this->archiveDir, "\\/") . DIRECTORY_SEPARATOR . $entry;
+            if (!is_file($candidate)) {
+                continue;
+            }
+
+            $actualHash = hash_file('sha256', $candidate);
+            if ($actualHash !== false && hash_equals($sha256, $actualHash)) {
+                return $candidate;
+            }
+        }
+
+        return null;
     }
 
     private function detectDelimiter(string $filePath): string

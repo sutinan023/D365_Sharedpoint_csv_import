@@ -99,20 +99,29 @@ final class DownloadQueue
         foreach ($this->repo->findPendingMoves() as $row) {
             $id = (int) $row['id'];
             $itemId = (string) $row['item_id'];
-            $recoveredItemIds[$itemId] = true;
 
             try {
                 $localPath = (string) ($row['local_path'] ?? '');
                 $expectedHash = (string) ($row['local_sha256'] ?? '');
                 if ($localPath === '' || !is_file($localPath)) {
-                    throw new RuntimeException('Downloaded local file is missing; SharePoint item was not moved');
+                    throw new RuntimeException('Downloaded local file is missing');
                 }
 
                 $actualHash = ($this->hashFile)($localPath);
                 if ($actualHash === false || $actualHash === '' || !hash_equals($expectedHash, $actualHash)) {
-                    throw new RuntimeException('Downloaded local file hash does not match; SharePoint item was not moved');
+                    throw new RuntimeException('Downloaded local file hash does not match');
                 }
+            } catch (\Throwable $e) {
+                $this->repo->resetForRedownload(
+                    $id,
+                    $e->getMessage()
+                        . '; redownload required from the SharePoint source folder, or operator recovery if it is no longer listed'
+                );
+                continue;
+            }
 
+            $recoveredItemIds[$itemId] = true;
+            try {
                 $this->repo->markStatus($id, 'MOVING');
                 $this->client->moveItem((string) $row['drive_id'], $itemId, $processedFolderId);
                 $this->repo->markMoved($id);
@@ -134,7 +143,8 @@ final class DownloadQueue
             return true;
         }
 
-        return ($existing['status'] ?? '') === 'ERROR' && empty($existing['local_path']);
+        return in_array($existing['status'] ?? '', ['ERROR', 'RECOVERY_ERROR'], true)
+            && empty($existing['local_path']);
     }
 
     private function validateDownload(string $path, ?int $expectedSize): void

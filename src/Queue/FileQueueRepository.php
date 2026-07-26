@@ -69,20 +69,25 @@ final class FileQueueRepository
     {
         $stmt = $this->pdo->query(
             "SELECT * FROM sharepoint_file_queue
-             WHERE status IN ('MOVED', 'IMPORT_ERROR')
+             WHERE status IN (
+                 'MOVED', 'IMPORT_ERROR', 'RECOVERY_ERROR',
+                 'DOWNLOADED', 'MOVING', 'IMPORTING'
+             )
              ORDER BY sharepoint_last_modified_at ASC, id ASC"
         );
 
         return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
-    public function recoverInterruptedImports(): void
+    public function findInterruptedImports(): array
     {
-        $this->pdo->exec(
-            "UPDATE sharepoint_file_queue
-             SET status = 'MOVED', last_error = NULL, updated_at = CURRENT_TIMESTAMP
-             WHERE status = 'IMPORTING'"
+        $stmt = $this->pdo->query(
+            "SELECT * FROM sharepoint_file_queue
+             WHERE status = 'IMPORTING'
+             ORDER BY sharepoint_last_modified_at ASC, id ASC"
         );
+
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
     }
 
     public function findPendingMoves(): array
@@ -123,6 +128,18 @@ final class FileQueueRepository
              WHERE id = :id"
         );
         $stmt->execute([':local_path' => $localPath, ':sha256' => $sha256, ':id' => $id]);
+    }
+
+    public function resetForRedownload(int $id, string $error): void
+    {
+        $stmt = $this->pdo->prepare(
+            "UPDATE sharepoint_file_queue
+             SET status = 'RECOVERY_ERROR', local_path = NULL, local_sha256 = NULL,
+                 downloaded_at = NULL, moved_at = NULL, last_error = :error,
+                 attempt_count = attempt_count + 1, updated_at = CURRENT_TIMESTAMP
+             WHERE id = :id"
+        );
+        $stmt->execute([':error' => $error, ':id' => $id]);
     }
 
     public function markMoved(int $id): void

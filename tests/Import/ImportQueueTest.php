@@ -1,6 +1,7 @@
 <?php
 
 use App\Import\ImportQueue;
+use App\Import\PaymentBeforePostImporter;
 use App\Queue\FileQueueRepository;
 
 function importQueueRepository(): array
@@ -38,7 +39,7 @@ return [
     'import queue skips duplicate files without importing them' => function (): void {
         $repo = new class {
             public array $statuses = [];
-            public function recoverInterruptedImports(): void {}
+            public function findInterruptedImports(): array { return []; }
             public function findReadyForImport(): array {
                 return [['id' => 1, 'local_path' => 'duplicate.csv', 'local_sha256' => 'duplicate-hash']];
             }
@@ -60,7 +61,7 @@ return [
     'import queue marks a successfully imported file as importing then imported' => function (): void {
         $repo = new class {
             public array $statuses = [];
-            public function recoverInterruptedImports(): void {}
+            public function findInterruptedImports(): array { return []; }
             public function findReadyForImport(): array {
                 return [['id' => 1, 'local_path' => 'ready.csv', 'local_sha256' => 'ready-hash']];
             }
@@ -82,7 +83,7 @@ return [
     'import queue stops after first import error' => function (): void {
         $repo = new class {
             public array $statuses = [];
-            public function recoverInterruptedImports(): void {}
+            public function findInterruptedImports(): array { return []; }
             public function findReadyForImport(): array {
                 return [
                     ['id' => 1, 'local_path' => 'old.csv', 'local_sha256' => 'oldhash'],
@@ -150,6 +151,9 @@ return [
 
         $importer = new class {
             public array $called = [];
+            public function reconcileInterruptedImport(array $row): array {
+                return ['action' => 'RETRY', 'message' => null];
+            }
             public function isDuplicateHash(string $sha256): bool { return false; }
             public function importFile(string $filePath, ?int $queueId = null): string {
                 $this->called[] = [basename($filePath), $queueId];
@@ -160,5 +164,100 @@ return [
 
         assert($importer->called === [['stale.csv', $id]]);
         assert($pdo->query("SELECT status FROM sharepoint_file_queue WHERE id = {$id}")->fetchColumn() === 'IMPORTED');
+    },
+    'interrupted import missing locally is completed from pending archive evidence' => function (): void {
+        [$pdo, $repo] = importQueueRepository();
+        $pdo->exec('CREATE TABLE import_files (
+            file_hash TEXT PRIMARY KEY,
+            source_file_name TEXT,
+            local_file_name TEXT,
+            status TEXT NOT NULL,
+            imported_at TEXT
+        )');
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'import_queue_' . uniqid('', true);
+        $archiveDir = $root . DIRECTORY_SEPARATOR . 'archive';
+        mkdir($archiveDir, 0777, true);
+        $localPath = $root . DIRECTORY_SEPARATOR . 'archive-window.csv';
+        $id = enqueueImportFile(
+            $repo,
+            'archive-window-item',
+            'archive-window.csv',
+            '2026-07-24T01:00:00Z',
+            $localPath
+        );
+        $hash = hash_file('sha256', $localPath);
+        $repo->markStatus($id, 'IMPORTING');
+        $pdo->prepare(
+            "INSERT INTO import_files (file_hash, source_file_name, local_file_name, status)
+             VALUES (?, 'archive-window.csv', ?, 'PENDING_ARCHIVE')"
+        )->execute([$hash, $localPath]);
+        rename($localPath, $archiveDir . DIRECTORY_SEPARATOR . '20260724_010203_archive-window.csv');
+
+        (new ImportQueue($repo, new PaymentBeforePostImporter($pdo, $archiveDir)))->run();
+
+        assert($pdo->query("SELECT status FROM sharepoint_file_queue WHERE id = {$id}")->fetchColumn() === 'IMPORTED');
+        assert($pdo->query("SELECT status FROM import_files WHERE file_hash = '{$hash}'")->fetchColumn() === 'SUCCESS');
+    },
+    'interrupted import missing locally is completed from successful import evidence' => function (): void {
+        [$pdo, $repo] = importQueueRepository();
+        $pdo->exec('CREATE TABLE import_files (
+            file_hash TEXT PRIMARY KEY,
+            source_file_name TEXT,
+            local_file_name TEXT,
+            status TEXT NOT NULL,
+            imported_at TEXT
+        )');
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'import_queue_' . uniqid('', true);
+        $archiveDir = $root . DIRECTORY_SEPARATOR . 'archive';
+        mkdir($archiveDir, 0777, true);
+        $localPath = $root . DIRECTORY_SEPARATOR . 'completed.csv';
+        $id = enqueueImportFile($repo, 'completed-item', 'completed.csv', '2026-07-24T01:00:00Z', $localPath);
+        $hash = hash_file('sha256', $localPath);
+        unlink($localPath);
+        $repo->markStatus($id, 'IMPORTING');
+        $pdo->prepare(
+            "INSERT INTO import_files (file_hash, source_file_name, local_file_name, status)
+             VALUES (?, 'completed.csv', ?, 'SUCCESS')"
+        )->execute([$hash, $localPath]);
+
+        (new ImportQueue($repo, new PaymentBeforePostImporter($pdo, $archiveDir)))->run();
+
+        assert($pdo->query("SELECT status FROM sharepoint_file_queue WHERE id = {$id}")->fetchColumn() === 'IMPORTED');
+    },
+    'unresolved older interrupted import blocks a newer moved file' => function (): void {
+        [$pdo, $repo] = importQueueRepository();
+        $pdo->exec('CREATE TABLE import_files (
+            file_hash TEXT PRIMARY KEY,
+            source_file_name TEXT,
+            local_file_name TEXT,
+            status TEXT NOT NULL,
+            imported_at TEXT
+        )');
+        $root = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'import_queue_' . uniqid('', true);
+        $archiveDir = $root . DIRECTORY_SEPARATOR . 'archive';
+        mkdir($archiveDir, 0777, true);
+
+        $oldPath = $root . DIRECTORY_SEPARATOR . 'missing-old.csv';
+        $oldId = enqueueImportFile($repo, 'missing-old-item', 'missing-old.csv', '2026-07-24T01:00:00Z', $oldPath);
+        $oldHash = hash_file('sha256', $oldPath);
+        unlink($oldPath);
+        $repo->markStatus($oldId, 'IMPORTING');
+        $pdo->prepare(
+            "INSERT INTO import_files (file_hash, source_file_name, local_file_name, status)
+             VALUES (?, 'missing-old.csv', ?, 'PENDING_ARCHIVE')"
+        )->execute([$oldHash, $oldPath]);
+
+        $newPath = $root . DIRECTORY_SEPARATOR . 'ready-new.csv';
+        $newId = enqueueImportFile($repo, 'ready-new-item', 'ready-new.csv', '2026-07-24T02:00:00Z', $newPath);
+
+        (new ImportQueue($repo, new PaymentBeforePostImporter($pdo, $archiveDir)))->run();
+
+        $statuses = $pdo->query('SELECT id, status FROM sharepoint_file_queue ORDER BY id')->fetchAll(PDO::FETCH_KEY_PAIR);
+        assert($statuses[$oldId] === 'RECOVERY_ERROR');
+        assert($statuses[$newId] === 'MOVED');
+        assert(str_contains(
+            (string) $pdo->query("SELECT last_error FROM sharepoint_file_queue WHERE id = {$oldId}")->fetchColumn(),
+            'PENDING_ARCHIVE'
+        ));
     },
 ];
