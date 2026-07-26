@@ -259,6 +259,50 @@ logs/
 
 Do NOT use download/ as archive storage.
 
+Monthly Download Cleanup
+--------------------------------------------------------
+
+Purpose:
+- Move old terminal CSV files out of download/.
+- Preserve files under archive/download-cleanup/YYYY-MM/.
+- Avoid deleting files permanently by default.
+- Never clean files still needed by active import or recovery statuses.
+
+Eligible queue statuses:
+- SUCCESS
+- IMPORTED
+- SKIPPED_DUPLICATE
+
+Protected queue statuses:
+- DISCOVERED
+- DOWNLOADING
+- DOWNLOADED
+- MOVING
+- MOVED
+- IMPORTING
+- ERROR
+- IMPORT_ERROR
+- RECOVERY_ERROR
+- RECOVERY_DOWNLOADING
+
+Configuration:
+DOWNLOAD_CLEANUP_RETENTION_DAYS=30
+
+Dry run:
+C:\xampp\php\php.exe maintenance\cleanup_download.php --dry-run
+
+Real run:
+C:\xampp\php\php.exe maintenance\cleanup_download.php --run
+
+Windows Task Scheduler target:
+C:\xampp\htdocs\D365_Sharedpoint_csv_import\run_download_cleanup.bat
+
+Recommended schedule:
+- Monthly
+- Day 1
+- 01:00
+- Do not schedule at the same time as run_import.bat.
+
 Monitor System
 --------------------------------------------------------
 

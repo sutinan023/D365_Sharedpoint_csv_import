@@ -118,7 +118,7 @@ final class FileQueueRepository
             "SELECT * FROM sharepoint_file_queue
              WHERE status IN ('SUCCESS', 'IMPORTED', 'SKIPPED_DUPLICATE')
                AND local_path IS NOT NULL
-               AND REPLACE(local_path, '\\', '/') LIKE :download_prefix
+               AND REPLACE(local_path, CHAR(92), '/') LIKE :download_prefix
                AND LOWER(local_path) LIKE '%.csv'
                AND COALESCE(imported_at, updated_at, created_at) < :cutoff
              ORDER BY COALESCE(imported_at, updated_at, created_at) ASC, id ASC"
