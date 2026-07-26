@@ -41,8 +41,9 @@ D365_Sharedpoint_csv_import/
 │   └── imported csv archive
 │
 ├── import/
-│   ├── download_csv.php
-│   └── run_import.php
+│   ├── run_pipeline.php
+│   ├── download_csv.php (legacy compatibility wrapper)
+│   └── run_import.php (legacy compatibility wrapper)
 │
 ├── logs/
 │
@@ -56,12 +57,24 @@ D365_Sharedpoint_csv_import/
 Environment Config (.env)
 --------------------------------------------------------
 
+Copy `config/.env.example` to `config/.env` and set values for the deployment.
+`config/.env` is local-only: do not commit it.
+
 TENANT_ID=
 CLIENT_ID=
 CLIENT_SECRET=
 
 SHAREPOINT_SITE=
 SHAREPOINT_FOLDER=
+
+# Queue pipeline settings (see config/.env.example for defaults)
+CSV_FOLDER=PaymentBeforePost
+CSV_DOWNLOADED_FOLDER=PaymentBeforePost_Downloaded
+CSV_LOCAL_DOWNLOAD_DIR=download
+CSV_LOCAL_ARCHIVE_DIR=archive
+CSV_LOCAL_ERROR_DIR=error
+GRAPH_RETRY_ATTEMPTS=3
+PIPELINE_LOCK_FILE=temp/pipeline.lock
 
 DB_HOST=localhost
 DB_NAME=
@@ -89,19 +102,14 @@ Main Flow
 
 SharePoint CSV
     ↓
-download_csv.php
+import/run_pipeline.php
     ↓
-download/
-    ↓
-run_import.php
-    ↓
-stg_payment_before_post
-    ↓
-payment_before_post
-    ↓
-payment_before_post_history
+download, SharePoint move, and ordered CSV import
     ↓
 D365 Import Monitor
+
+Run `import/run_pipeline.php` as the only operational entrypoint. The legacy
+`download_csv.php` and `run_import.php` scripts are compatibility wrappers only.
 
 Database Tables
 --------------------------------------------------------
@@ -275,7 +283,7 @@ Security
 - Duplicate Protection
 - Transaction Rollback
 - Keep CLIENT_SECRET, database passwords, access tokens, and Graph download URLs out of logs.
-- Do not commit config/.env, download/, archive/, error/, logs/, or vendor/.
+- `config/.env` is local-only; do not commit it, download/, archive/, error/, logs/, or vendor/.
 
 Recommended Future Improvements
 --------------------------------------------------------
