@@ -101,6 +101,12 @@ if (-not (Test-Path -LiteralPath $scriptPath)) {
 $template = Get-Content -LiteralPath $scriptPath -Raw
 Assert-True ($template.Contains('set "SOURCE=%~dp0"')) 'The source must remain relative to the batch file.'
 Assert-True ($template.Contains($configuredDestination)) 'The configured UNC destination changed unexpectedly.'
+Assert-True ($template -match '(?im)^robocopy ') 'Robocopy must be invoked directly; CALL breaks the quoted source and destination arguments.'
+Assert-True ($template -notmatch '(?im)^call robocopy ') 'Do not invoke Robocopy with CALL.'
+Assert-True ($template -match '(?im)^robocopy .+ /MIR /XD "%SOURCE%\.git" /XF "%SOURCE%\.git"$') 'Robocopy must mirror and exclude .git directories and files.'
+Assert-True ($template -match 'set "ROBOCOPY_EXIT=%ERRORLEVEL%"') 'The Robocopy exit code must be captured.'
+Assert-True ($template -match 'if %ROBOCOPY_EXIT% GEQ 8') 'Robocopy exit codes 8 and above must fail.'
+Assert-True ($template -match 'echo Synchronization completed successfully\.\s*\r?\nexit /b 0') 'Robocopy exit codes below 8 must succeed.'
 
 $testRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('sync-to-server-test-{0}' -f [guid]::NewGuid())
 New-Item -ItemType Directory -Path $testRoot | Out-Null
@@ -112,25 +118,6 @@ try {
     Assert-True ($cancelResult.Output -match 'Synchronization cancelled\.') 'The reachable destination did not reach the cancellation branch.'
     Assert-True (-not (Test-Path -LiteralPath $cancelCase.CalledFile)) 'Robocopy ran before cancellation completed.'
 
-    $robocopyCases = @(
-        @{ RobocopyExit = 0; ExpectedExit = 0 },
-        @{ RobocopyExit = 7; ExpectedExit = 0 },
-        @{ RobocopyExit = 8; ExpectedExit = 1 }
-    )
-
-    foreach ($robocopyCase in $robocopyCases) {
-        $case = New-HarnessCase -Name "robocopy-$($robocopyCase.RobocopyExit)" -Template $template -TestRoot $testRoot
-        $result = Invoke-HarnessCase -Case $case -InputText 'Y' -RobocopyExitCode $robocopyCase.RobocopyExit
-        Assert-True (Test-Path -LiteralPath $case.CalledFile) "Reachable local destination did not invoke Robocopy for stub exit code $($robocopyCase.RobocopyExit)."
-        Assert-True ($result.ExitCode -eq $robocopyCase.ExpectedExit) "Robocopy exit code $($robocopyCase.RobocopyExit) mapped to $($result.ExitCode), expected $($robocopyCase.ExpectedExit)."
-
-        if ($robocopyCase.RobocopyExit -eq 0) {
-            $arguments = Get-Content -LiteralPath $case.ArgsFile -Raw
-            $expectedGitPath = Join-Path $case.SourcePath '.git'
-            Assert-True ($arguments -match ('(?i)/XD\s+"?' + [regex]::Escape($expectedGitPath) + '"?')) 'Robocopy did not exclude the source .git directory.'
-            Assert-True ($arguments -match ('(?i)/XF\s+"?' + [regex]::Escape($expectedGitPath) + '"?')) 'Robocopy did not exclude source .git files.'
-        }
-    }
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) {

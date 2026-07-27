@@ -23,7 +23,7 @@ if /I not "%CONFIRM%"=="Y" (
     exit /b 1
 )
 
-call robocopy "%SOURCE%" "%DESTINATION%" /MIR /XD "%SOURCE%.git" /XF "%SOURCE%.git"
+robocopy "%SOURCE%" "%DESTINATION%" /MIR /XD "%SOURCE%.git" /XF "%SOURCE%.git"
 set "ROBOCOPY_EXIT=%ERRORLEVEL%"
 
 echo.
