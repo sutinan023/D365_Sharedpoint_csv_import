@@ -86,7 +86,9 @@ ADMIN_USERNAME=admin
 ADMIN_PASSWORD=123456
 
 Database migration:
-Run database/migrations/001_create_sharepoint_file_queue.sql before enabling the new scheduler.
+Run these migrations before enabling the new scheduler:
+- database/migrations/001_create_sharepoint_file_queue.sql
+- database/migrations/002_add_pending_archive_to_import_files_status.sql
 
 SharePoint folders:
 - Source: PaymentBeforePost
