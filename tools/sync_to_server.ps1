@@ -49,7 +49,7 @@ function Test-ExcludedPath {
 }
 
 $changes = @(
-    foreach ($sourceFile in Get-ChildItem -LiteralPath $resolvedSourceRoot -File -Recurse) {
+    foreach ($sourceFile in Get-ChildItem -LiteralPath $resolvedSourceRoot -File -Recurse -Force) {
         $relativePath = $sourceFile.FullName.Substring($resolvedSourceRoot.Length).TrimStart('\', '/')
         if (Test-ExcludedPath -RelativePath $relativePath -Patterns $Exclude) {
             continue

@@ -25,6 +25,9 @@ try {
     Set-Content -LiteralPath (Join-Path $destinationRoot 'modified.txt') -Value 'destination version'
     Set-Content -LiteralPath (Join-Path $sourceRoot 'equal.txt') -Value 'same content'
     Set-Content -LiteralPath (Join-Path $destinationRoot 'equal.txt') -Value 'same content'
+    $hiddenPath = Join-Path $sourceRoot 'hidden.txt'
+    Set-Content -LiteralPath $hiddenPath -Value 'hidden source file'
+    (Get-Item -LiteralPath $hiddenPath).Attributes = (Get-Item -LiteralPath $hiddenPath).Attributes -bor [System.IO.FileAttributes]::Hidden
 
     $logsRoot = Join-Path $sourceRoot 'logs'
     New-Item -ItemType Directory -Path $logsRoot | Out-Null
@@ -37,6 +40,7 @@ try {
         -Exclude @() | Out-String
 
     Assert-True ($comparison -match '(?m)^New:\s+new\.txt\s*$') 'A source-only file was not listed as New.'
+    Assert-True ($comparison -match '(?m)^New:\s+hidden\.txt\s*$') 'A hidden source file was not listed as New.'
     Assert-True ($comparison -match '(?m)^Modified:\s+modified\.txt\s*$') 'A file with a different hash was not listed as Modified.'
     Assert-True ($comparison -notmatch '(?m)equal\.txt') 'A file with an equal hash was incorrectly listed as changed.'
 
