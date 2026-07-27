@@ -11,7 +11,7 @@ echo WARNING: Mirror mode will delete destination files that do not exist in the
 echo The .git directory will not be synchronized.
 echo.
 
-if not exist "%DESTINATION%\NUL" (
+if not exist "%DESTINATION%\." (
     echo ERROR: Destination is not reachable.
     exit /b 1
 )
@@ -23,7 +23,7 @@ if /I not "%CONFIRM%"=="Y" (
     exit /b 1
 )
 
-robocopy "%SOURCE%" "%DESTINATION%" /MIR /XD "%SOURCE%.git"
+call robocopy "%SOURCE%" "%DESTINATION%" /MIR /XD "%SOURCE%.git" /XF "%SOURCE%.git"
 set "ROBOCOPY_EXIT=%ERRORLEVEL%"
 
 echo.
