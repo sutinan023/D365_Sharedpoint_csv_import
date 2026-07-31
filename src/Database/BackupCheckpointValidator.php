@@ -15,6 +15,9 @@ final class BackupCheckpointValidator
         '\\\\100.1.1.166\\c$\\xampp\\backups\\d365\\uat',
         '\\\\100.1.1.166\\c$\\xampp\\backups\\d365\\prod',
     ];
+    private const SYSTEM_SID = 'S-1-5-18';
+    private const ADMINISTRATORS_SID = 'S-1-5-32-544';
+    private const WRITE_LIKE_MASK = 2 | 4 | 16 | 64 | 256 | 65536 | 262144 | 524288;
 
     public static function validate(
         string $manifestPath,
@@ -26,10 +29,6 @@ final class BackupCheckpointValidator
         $root = self::selectRoot($manifestPath, $localTestRoot);
         $manifestPath = self::trustedFile($manifestPath, $root);
         $receiptPath = self::trustedFile($receiptPath, $root);
-        if ($localTestRoot === null) {
-            self::assertProtectedAcl([$root, $manifestPath, $receiptPath]);
-        }
-
         $manifestSnapshot = self::readJsonSnapshot($manifestPath, 'backup manifest');
         $manifest = $manifestSnapshot['value'];
         $segment = $database === 'D365_finance' ? 'uat' : ($database === 'D365_finance_prod' ? 'prod' : '');
@@ -45,9 +44,11 @@ final class BackupCheckpointValidator
 
         $receiptSnapshot = self::readJsonSnapshot($receiptPath, 'restore rehearsal receipt');
         $receipt = $receiptSnapshot['value'];
+        $approverSid = $receipt['approved_by_sid'] ?? null;
         if (($receipt['status'] ?? null) !== 'PASSED' || ($receipt['release_id'] ?? null) !== $releaseId
             || strcasecmp((string)($receipt['database'] ?? ''), $database) !== 0
-            || trim((string)($receipt['approved_at'] ?? '')) === '' || trim((string)($receipt['approved_by'] ?? '')) === '') {
+            || trim((string)($receipt['approved_at'] ?? '')) === '' || trim((string)($receipt['approved_by'] ?? '')) === ''
+            || !is_string($approverSid) || preg_match('/^S-1-(?:[0-9]+-)+[0-9]+$/', $approverSid) !== 1) {
             throw new RuntimeException('Restore rehearsal receipt is legacy, incomplete, or mismatched.');
         }
         if (self::normalize(self::trustedFile(self::stringField($receipt, 'backup_path', 'receipt'), $root)) !== self::normalize($backupPath)) {
@@ -58,9 +59,7 @@ final class BackupCheckpointValidator
         $auditPath = self::trustedFile(self::stringField($receipt, 'sanitizer_audit_path', 'receipt'), $root);
         $sanitizedPath = self::trustedFile(self::stringField($receipt, 'sanitized_path', 'receipt'), $root);
         $evidencePath = self::trustedFile(self::stringField($receipt, 'evidence_path', 'receipt'), $root);
-        if ($localTestRoot === null) {
-            self::assertProtectedAcl([$backupPath, $auditPath, $sanitizedPath, $evidencePath]);
-        }
+        if ($localTestRoot === null) { self::assertProtectedAcl([$root, $manifestPath, $receiptPath, $backupPath, $auditPath, $sanitizedPath, $evidencePath], $approverSid); }
         $audit = self::readJsonSnapshot($auditPath, 'sanitizer audit');
         $sanitized = self::readArtifactSnapshot($sanitizedPath, 'sanitized backup');
         $evidence = self::readJsonSnapshot($evidencePath, 'restore evidence');
@@ -69,7 +68,10 @@ final class BackupCheckpointValidator
         self::matchArtifact($evidence, $receipt['evidence_sha256'] ?? null, $receipt['evidence_size_bytes'] ?? null, 'receipt evidence');
 
         $auditValue = $audit['value'];
-        if (self::normalize(self::trustedFile(self::stringField($auditValue, 'source_path', 'sanitizer audit'), $root)) !== self::normalize($backupPath)
+        $auditRehearsal = self::stringField($auditValue, 'rehearsal_database', 'sanitizer audit');
+        $rehearsalPrefix = $database . '_rehearsal_';
+        if (preg_match('/^[A-Za-z0-9_]+$/', $auditRehearsal) !== 1 || stripos($auditRehearsal, $rehearsalPrefix) !== 0 || strlen($auditRehearsal) <= strlen($rehearsalPrefix)
+            || self::normalize(self::trustedFile(self::stringField($auditValue, 'source_path', 'sanitizer audit'), $root)) !== self::normalize($backupPath)
             || self::normalize(self::trustedFile(self::stringField($auditValue, 'sanitized_path', 'sanitizer audit'), $root)) !== self::normalize($sanitizedPath)
             || ($auditValue['source_database'] ?? null) !== $database
             || !self::sameHash($auditValue['source_sha256'] ?? null, $backup['hash'])
@@ -89,13 +91,30 @@ final class BackupCheckpointValidator
             throw new RuntimeException('Restore evidence does not bind the verified artifacts.');
         }
         self::assertEvidence($proof);
-        if (($receipt['rehearsal_database'] ?? null) !== $proof['rehearsal_database']
+        if ($auditRehearsal !== (string)$proof['rehearsal_database']
+            || ($receipt['rehearsal_database'] ?? null) !== $proof['rehearsal_database']
             || ($receipt['row_counts'] ?? null) !== $proof['row_counts']
             || ($receipt['views'] ?? null) !== $proof['views']
             || ($receipt['live_schema_reference_count'] ?? null) !== 0) {
             throw new RuntimeException('Restore receipt does not copy verified evidence exactly.');
         }
         return $manifest;
+    }
+
+    public static function validateAclEvidence(array $evidence, string $approverSid): void
+    {
+        if (preg_match('/^S-1-(?:[0-9]+-)+[0-9]+$/', $approverSid) !== 1) { throw new RuntimeException('Approver SID is invalid.'); }
+        $allowed = [self::SYSTEM_SID => true, self::ADMINISTRATORS_SID => true, $approverSid => true];
+        $owner = $evidence['owner_sid'] ?? null;
+        if (!is_string($owner) || preg_match('/^S-1-(?:[0-9]+-)+[0-9]+$/', $owner) !== 1 || !isset($allowed[$owner])) {
+            throw new RuntimeException('ACL owner SID is missing or not explicitly allowed.');
+        }
+        if (!isset($evidence['allow_aces']) || !is_array($evidence['allow_aces'])) { throw new RuntimeException('ACL Allow ACE evidence is missing.'); }
+        foreach ($evidence['allow_aces'] as $ace) {
+            $sid = is_array($ace) ? ($ace['sid'] ?? null) : null; $rights = is_array($ace) ? ($ace['rights_value'] ?? null) : null;
+            if (!is_string($sid) || preg_match('/^S-1-(?:[0-9]+-)+[0-9]+$/', $sid) !== 1 || !is_int($rights) || $rights < 0) { throw new RuntimeException('ACL Allow ACE identity or rights could not be verified.'); }
+            if (($rights & self::WRITE_LIKE_MASK) !== 0 && !isset($allowed[$sid])) { throw new RuntimeException("ACL grants write-like rights to unapproved SID: $sid"); }
+        }
     }
 
     private static function selectRoot(string $manifestPath, ?string $localTestRoot): string
@@ -237,14 +256,22 @@ final class BackupCheckpointValidator
         self::nativeNonNegative($proof['live_schema_reference_count'] ?? null, 'live schema reference count'); if ($proof['live_schema_reference_count'] !== 0 || trim((string)($proof['verified_at'] ?? '')) === '' || trim((string)($proof['verified_by'] ?? '')) === '') { throw new RuntimeException('Restore evidence verification metadata is invalid.'); }
     }
 
-    private static function assertProtectedAcl(array $paths): void
+    private static function assertProtectedAcl(array $paths, string $approverSid): void
     {
-        if (PHP_OS_FAMILY !== 'Windows' || !function_exists('exec')) { throw new RuntimeException('Trusted-root ACL validation is unavailable.'); }
+        if (PHP_OS_FAMILY !== 'Windows' || !function_exists('proc_open')) { throw new RuntimeException('Trusted-root ACL validation is unavailable.'); }
+        $helper = dirname(__DIR__, 2) . '/tools/get_file_acl_evidence.ps1';
+        if (!is_file($helper)) { throw new RuntimeException('Trusted-root ACL helper is unavailable.'); }
         foreach (array_unique($paths) as $path) {
-            $output = []; $code = 0; exec('icacls ' . escapeshellarg($path), $output, $code);
-            if ($code !== 0) { throw new RuntimeException('Trusted-root ACL could not be verified.'); }
-            $acl = implode("\n", $output);
-            if (preg_match('/(?:Everyone|Authenticated Users|BUILTIN\\\\Users|S-1-1-0|S-1-5-11|S-1-5-32-545).*\((?:F|M|W|WD|AD|DC|WA|WEA)\)/i', $acl)) { throw new RuntimeException('Trusted-root ACL grants broad write access.'); }
+            $command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-Path', $path];
+            $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
+            $process = proc_open($command, $descriptors, $pipes, null, null, ['bypass_shell' => true]);
+            if (!is_resource($process)) { throw new RuntimeException('Trusted-root ACL helper could not start.'); }
+            $stdout = stream_get_contents($pipes[1]); $stderr = stream_get_contents($pipes[2]); fclose($pipes[1]); fclose($pipes[2]); $code = proc_close($process);
+            if ($code !== 0 || !is_string($stdout) || trim($stdout) === '' || trim((string)$stderr) !== '') { throw new RuntimeException('Trusted-root ACL helper failed closed.'); }
+            self::rejectDuplicateKeys($stdout, 'ACL evidence');
+            try { $evidence = json_decode($stdout, true, 32, JSON_THROW_ON_ERROR); } catch (JsonException $exception) { throw new RuntimeException('Trusted-root ACL helper returned invalid JSON.', 0, $exception); }
+            if (!is_array($evidence)) { throw new RuntimeException('Trusted-root ACL helper returned invalid evidence.'); }
+            self::validateAclEvidence($evidence, $approverSid);
         }
     }
 }

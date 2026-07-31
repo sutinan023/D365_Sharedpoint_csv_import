@@ -15,7 +15,7 @@ function checkpointFixture(string $directory): array
     ]));
     $audit = $directory . '/backup.sanitized.audit.json';
     file_put_contents($audit, json_encode([
-        'source_path' => $backup, 'source_database' => 'D365_finance_prod', 'source_sha256' => hash_file('sha256', $backup),
+        'source_path' => $backup, 'source_database' => 'D365_finance_prod', 'rehearsal_database' => 'D365_finance_prod_rehearsal_r1', 'source_sha256' => hash_file('sha256', $backup),
         'sanitized_path' => $sanitized, 'sanitized_sha256' => hash_file('sha256', $sanitized),
         'sanitized_size_bytes' => filesize($sanitized),
     ]));
@@ -37,7 +37,7 @@ function checkpointFixture(string $directory): array
         'evidence_sha256' => hash_file('sha256', $evidence), 'evidence_path' => $evidence, 'evidence_size_bytes' => filesize($evidence),
         'row_counts' => ['import_files' => 1, 'payment_outbound' => 2, 'payment_mail_log' => 0, 'sharepoint_file_queue' => 3],
         'views' => ['vw_import_report' => ['row_count' => 1, 'security_type' => 'INVOKER'], 'v_tbpayin_from_payment_outbound' => ['row_count' => 2, 'security_type' => 'INVOKER']],
-        'live_schema_reference_count' => 0, 'approved_at' => '2026-08-01T00:00:00Z', 'approved_by' => 'tester',
+        'live_schema_reference_count' => 0, 'approved_at' => '2026-08-01T00:00:00Z', 'approved_by' => 'tester', 'approved_by_sid' => 'S-1-5-21-1-2-3-1001',
     ]));
     return compact('backup', 'sanitized', 'manifest', 'audit', 'evidence', 'receipt');
 }
@@ -86,5 +86,15 @@ return [
         try { BackupCheckpointValidator::validate($f['manifest'], $outside, 'D365_finance_prod', 'r1', $directory); }
         catch (RuntimeException $e) { assert(str_contains($e->getMessage(), 'trusted root')); unlink($outside); foreach ($f as $path) { if (is_file($path)) unlink($path); } rmdir($directory); return; }
         throw new RuntimeException('Expected artifact outside injected root to be rejected');
+    },
+    'backup checkpoint ACL policy permits only approved SID writers and owner' => function (): void {
+        BackupCheckpointValidator::validateAclEvidence(['owner_sid' => 'S-1-5-18', 'allow_aces' => [['sid' => 'S-1-5-32-544', 'rights_value' => 2, 'is_inherited' => true]]], 'S-1-5-21-1-2-3-1001');
+        foreach ([['owner_sid' => 'S-1-5-21-9', 'allow_aces' => []], ['owner_sid' => 'S-1-5-18', 'allow_aces' => [['sid' => 'S-1-5-21-9', 'rights_value' => 2, 'is_inherited' => false]]]] as $bad) { try { BackupCheckpointValidator::validateAclEvidence($bad, 'S-1-5-21-1-2-3-1001'); } catch (RuntimeException) { continue; } throw new RuntimeException('Expected unapproved ACL identity to be rejected'); }
+    },
+    'backup checkpoint validator rejects sanitizer rehearsal mismatch' => function (): void {
+        foreach (['missing', 'D365_finance_rehearsal_cross'] as $badValue) {
+            $directory = sys_get_temp_dir() . '/checkpoint-validator-' . bin2hex(random_bytes(4)); mkdir($directory); $f = checkpointFixture($directory); $audit = json_decode((string)file_get_contents($f['audit']), true); if ($badValue === 'missing') { unset($audit['rehearsal_database']); } else { $audit['rehearsal_database'] = $badValue; } file_put_contents($f['audit'], json_encode($audit)); $receipt = json_decode((string)file_get_contents($f['receipt']), true); $receipt['sanitizer_audit_sha256'] = hash_file('sha256', $f['audit']); $receipt['sanitizer_audit_size_bytes'] = filesize($f['audit']); file_put_contents($f['receipt'], json_encode($receipt));
+            try { BackupCheckpointValidator::validate($f['manifest'], $f['receipt'], 'D365_finance_prod', 'r1', $directory); } catch (RuntimeException) { foreach ($f as $path) { if (is_file($path)) unlink($path); } rmdir($directory); continue; } throw new RuntimeException('Expected sanitizer rehearsal mismatch to be rejected');
+        }
     },
 ];
