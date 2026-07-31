@@ -90,6 +90,19 @@ try {
     if ($viewLiteralSanitized -notmatch [regex]::Escape($viewLiteral)) { throw 'Sanitizer changed a quoted VIEW string literal.' }
     if ($viewLiteralSanitized -notmatch 'FROM `D365_finance_rehearsal_20260731_2130`\.`table1`') { throw 'Sanitizer did not transform the real VIEW reference.' }
 
+    $commentTrapPath = Join-Path $testRoot 'comment-trap.sql'
+    $commentTrapDump = (Get-TestDump -DatabaseName 'D365_finance') + "`n/* ' */ INSERT INTO target SELECT * FROM ``D365_finance``.``outside_source``; /* ' */`n"
+    [IO.File]::WriteAllText($commentTrapPath, $commentTrapDump, (New-Object Text.UTF8Encoding($false)))
+    $commentTrapHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $commentTrapPath).Hash.ToLowerInvariant()
+    Assert-Throws { & $scriptPath -BackupPath $commentTrapPath -ExpectedSourceSha256 $commentTrapHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$commentTrapPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'outside a recognized VIEW'
+
+    foreach ($unterminatedSuffix in @('/* missing end', "'missing end")) {
+        $unterminatedPath = Join-Path $testRoot ('unterminated-{0}.sql' -f [guid]::NewGuid())
+        [IO.File]::WriteAllText($unterminatedPath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$unterminatedSuffix"), (New-Object Text.UTF8Encoding($false)))
+        $unterminatedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $unterminatedPath).Hash.ToLowerInvariant()
+        Assert-Throws { & $scriptPath -BackupPath $unterminatedPath -ExpectedSourceSha256 $unterminatedHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$unterminatedPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'unterminated'
+    }
+
     foreach ($objectSql in @(
         'CREATE TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET @x = 1;',
         '/*!50003 CREATE*/ /*!50020 PROCEDURE `p`() SELECT 1 */;',

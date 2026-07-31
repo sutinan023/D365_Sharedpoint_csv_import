@@ -93,10 +93,84 @@ if ($actualSourceHash -cne $ExpectedSourceSha256.ToLowerInvariant()) {
     throw 'Source backup hash does not match the expected SHA-256 value.'
 }
 try {
-    $sourceText = (New-Object Text.UTF8Encoding($false, $true)).GetString($sourceBytes)
+$sourceText = (New-Object Text.UTF8Encoding($false, $true)).GetString($sourceBytes)
 } catch [Text.DecoderFallbackException] {
     throw 'Source backup must be valid UTF-8.'
 }
+
+function Add-SqlLexicalSpans {
+    param(
+        [string] $Text,
+        [int] $Start,
+        [int] $End,
+        [System.Collections.Generic.List[object]] $StringSpans,
+        [System.Collections.Generic.List[object]] $ProtectedSpans
+    )
+
+    $index = $Start
+    while ($index -lt $End) {
+        $character = $Text[$index]
+        if ($character -eq '/' -and ($index + 1) -lt $End -and $Text[$index + 1] -eq '*') {
+            $commentEnd = $Text.IndexOf('*/', $index + 2, [StringComparison]::Ordinal)
+            if ($commentEnd -lt 0 -or $commentEnd -ge $End) { throw 'Source dump contains an unterminated block comment.' }
+            if (($index + 2) -lt $End -and $Text[$index + 2] -eq '!') {
+                $contentStart = $index + 3
+                while ($contentStart -lt $commentEnd -and [char]::IsDigit($Text[$contentStart])) { $contentStart++ }
+                Add-SqlLexicalSpans -Text $Text -Start $contentStart -End $commentEnd -StringSpans $StringSpans -ProtectedSpans $ProtectedSpans
+            } else {
+                $span = [pscustomobject]@{ Index = $index; Length = ($commentEnd + 2 - $index) }
+                [void] $ProtectedSpans.Add($span)
+            }
+            $index = $commentEnd + 2
+            continue
+        }
+        if ($character -eq '#' -or ($character -eq '-' -and ($index + 2) -lt $End -and $Text[$index + 1] -eq '-' -and [char]::IsWhiteSpace($Text[$index + 2]))) {
+            $commentStart = $index
+            while ($index -lt $End -and $Text[$index] -ne "`r" -and $Text[$index] -ne "`n") { $index++ }
+            [void] $ProtectedSpans.Add([pscustomobject]@{ Index = $commentStart; Length = ($index - $commentStart) })
+            continue
+        }
+        if ($character -eq "'" -or $character -eq '"') {
+            $quote = $character
+            $stringStart = $index
+            $index++
+            $closed = $false
+            while ($index -lt $End) {
+                if ($Text[$index] -eq '\') {
+                    $index += 2
+                    continue
+                }
+                if ($Text[$index] -eq $quote) {
+                    if (($index + 1) -lt $End -and $Text[$index + 1] -eq $quote) {
+                        $index += 2
+                        continue
+                    }
+                    $index++
+                    $closed = $true
+                    break
+                }
+                $index++
+            }
+            if (-not $closed) { throw 'Source dump contains an unterminated quoted string.' }
+            $span = [pscustomobject]@{ Index = $stringStart; Length = ($index - $stringStart) }
+            [void] $StringSpans.Add($span)
+            [void] $ProtectedSpans.Add($span)
+            continue
+        }
+        $index++
+    }
+}
+
+function Get-SqlLexicalSpans {
+    param([string] $Text)
+
+    $stringSpans = New-Object 'System.Collections.Generic.List[object]'
+    $protectedSpans = New-Object 'System.Collections.Generic.List[object]'
+    Add-SqlLexicalSpans -Text $Text -Start 0 -End $Text.Length -StringSpans $stringSpans -ProtectedSpans $protectedSpans
+    return [pscustomobject]@{ StringSpans = [object[]] $stringSpans.ToArray(); ProtectedSpans = [object[]] $protectedSpans.ToArray() }
+}
+
+$sourceLexicalSpans = Get-SqlLexicalSpans -Text $sourceText
 if ($sourceText -match '(?i)\bCREATE\s+DATABASE\b|\bUSE\s+(?:`[^`]+`|[A-Za-z0-9_]+)\b') {
     throw 'Source dump contains CREATE DATABASE or USE statements and cannot be isolated safely.'
 }
@@ -108,8 +182,6 @@ $definerPattern = '(?is)\bDEFINER\s*=\s*`[^`]+`\s*@\s*`[^`]+`\s+SQL\s+SECURITY\s
 $sourceQualifierPattern = '`' + [regex]::Escape($SourceDatabase) + '`\.'
 $viewBlockPattern = '(?is)/\*!\d{5}\s+CREATE\s+ALGORITHM\b.*?\bVIEW\b.*?\*/;'
 $viewBlocks = [regex]::Matches($sourceText, $viewBlockPattern)
-$sqlStringPattern = '(?s)''(?:''''|\\.|[^''\\])*''|"(?:""|\\.|[^"\\])*"'
-$sqlStrings = [regex]::Matches($sourceText, $sqlStringPattern)
 function Test-MatchInsideRanges {
     param([Text.RegularExpressions.Match] $Match, [System.Collections.IEnumerable] $Ranges)
 
@@ -126,20 +198,19 @@ function Convert-ViewBlock {
         [string] $Block,
         [string] $DefinerPattern,
         [string] $QualifierPattern,
-        [string] $ReplacementDatabase,
-        [string] $StringPattern
+        [string] $ReplacementDatabase
     )
 
-    $strings = [regex]::Matches($Block, $StringPattern)
+    $protectedSpans = (Get-SqlLexicalSpans -Text $Block).ProtectedSpans
     $builder = New-Object Text.StringBuilder
     $cursor = 0
-    foreach ($stringMatch in $strings) {
-        $nonStringSegment = $Block.Substring($cursor, $stringMatch.Index - $cursor)
+    foreach ($protectedSpan in $protectedSpans) {
+        $nonStringSegment = $Block.Substring($cursor, $protectedSpan.Index - $cursor)
         $nonStringSegment = [regex]::Replace($nonStringSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
         $nonStringSegment = [regex]::Replace($nonStringSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'))
         [void] $builder.Append($nonStringSegment)
-        [void] $builder.Append($stringMatch.Value)
-        $cursor = $stringMatch.Index + $stringMatch.Length
+        [void] $builder.Append($Block.Substring($protectedSpan.Index, $protectedSpan.Length))
+        $cursor = $protectedSpan.Index + $protectedSpan.Length
     }
     $remainingSegment = $Block.Substring($cursor)
     $remainingSegment = [regex]::Replace($remainingSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
@@ -147,8 +218,8 @@ function Convert-ViewBlock {
     [void] $builder.Append($remainingSegment)
     return $builder.ToString()
 }
-$allDefiners = @([regex]::Matches($sourceText, $definerPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sqlStrings) })
-$allQualifiedReferences = @([regex]::Matches($sourceText, $sourceQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sqlStrings) })
+$allDefiners = @([regex]::Matches($sourceText, $definerPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
+$allQualifiedReferences = @([regex]::Matches($sourceText, $sourceQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
 $outsideDefiners = @($allDefiners | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $viewBlocks) })
 $outsideQualifiedReferences = @($allQualifiedReferences | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $viewBlocks) })
 if ($outsideDefiners.Count -ne 0 -or $outsideQualifiedReferences.Count -ne 0) {
@@ -168,7 +239,7 @@ $cursor = 0
 foreach ($viewBlock in $viewBlocks) {
     [void] $textBuilder.Append($sourceText.Substring($cursor, $viewBlock.Index - $cursor))
     $sanitizedBlock = Convert-ViewBlock -Block $viewBlock.Value -DefinerPattern $definerPattern `
-        -QualifierPattern $sourceQualifierPattern -ReplacementDatabase $RehearsalDatabase -StringPattern $sqlStringPattern
+        -QualifierPattern $sourceQualifierPattern -ReplacementDatabase $RehearsalDatabase
     [void] $textBuilder.Append($sanitizedBlock)
     $cursor = $viewBlock.Index + $viewBlock.Length
 }
@@ -176,19 +247,19 @@ foreach ($viewBlock in $viewBlocks) {
 $sanitizedText = $textBuilder.ToString()
 
 $rehearsalQualifierPattern = '`' + [regex]::Escape($RehearsalDatabase) + '`\.'
-$sanitizedStrings = [regex]::Matches($sanitizedText, $sqlStringPattern)
-$remainingDefiners = @([regex]::Matches($sanitizedText, '(?i)\bDEFINER\s*=|\bSQL\s+SECURITY\s+DEFINER\b') | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedStrings) })
-$remainingSourceQualifiers = @([regex]::Matches($sanitizedText, $sourceQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedStrings) })
+$sanitizedLexicalSpans = Get-SqlLexicalSpans -Text $sanitizedText
+$remainingDefiners = @([regex]::Matches($sanitizedText, '(?i)\bDEFINER\s*=|\bSQL\s+SECURITY\s+DEFINER\b') | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })
+$remainingSourceQualifiers = @([regex]::Matches($sanitizedText, $sourceQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })
 if ($remainingDefiners.Count -ne 0) {
     throw 'Sanitized dump retained a definer security clause.'
 }
 if ($remainingSourceQualifiers.Count -ne 0) {
     throw 'Sanitized dump retained a source database qualifier.'
 }
-if ((@([regex]::Matches($sanitizedText, '(?i)\bSQL\s+SECURITY\s+INVOKER\b') | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedStrings) })).Count -ne $ExpectedDefinerCount) {
+if ((@([regex]::Matches($sanitizedText, '(?i)\bSQL\s+SECURITY\s+INVOKER\b') | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })).Count -ne $ExpectedDefinerCount) {
     throw 'Sanitized dump has an unexpected INVOKER count.'
 }
-if ((@([regex]::Matches($sanitizedText, $rehearsalQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedStrings) })).Count -ne $ExpectedQualifiedReferenceCount) {
+if ((@([regex]::Matches($sanitizedText, $rehearsalQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })).Count -ne $ExpectedQualifiedReferenceCount) {
     throw 'Sanitized dump has an unexpected rehearsal qualifier count.'
 }
 
