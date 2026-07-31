@@ -12,10 +12,13 @@ if (is_file($pipeline)) {
 require __DIR__ . '/../vendor/autoload.php';
 
 use App\Import\PaymentBeforePostImporter;
+use App\Config\EnvironmentGuard;
 use Dotenv\Dotenv;
 
-$dotenv = Dotenv::createImmutable(__DIR__ . '/../config');
+$rootDir = dirname(__DIR__);
+$dotenv = Dotenv::createImmutable($rootDir . '/config');
 $dotenv->load();
+EnvironmentGuard::validate($_ENV, $rootDir, true);
 
 echo "=========================\n";
 echo "START IMPORT\n";

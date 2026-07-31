@@ -1,0 +1,2 @@
+RewriteEngine On
+RewriteRule ^(.*)$ /prod/finance_report/$1 [R=302,L,NE]

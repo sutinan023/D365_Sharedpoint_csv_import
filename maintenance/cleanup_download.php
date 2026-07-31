@@ -1,6 +1,7 @@
 <?php
 
 use App\Config\AppConfig;
+use App\Config\EnvironmentGuard;
 use App\Maintenance\DownloadCleanup;
 use App\Queue\FileQueueRepository;
 use App\Support\Logger;
@@ -10,6 +11,7 @@ require dirname(__DIR__) . '/vendor/autoload.php';
 
 $rootDir = dirname(__DIR__);
 Dotenv::createImmutable($rootDir . '/config')->safeLoad();
+EnvironmentGuard::validate($_ENV, $rootDir, true);
 
 $dryRun = !in_array('--run', $argv, true);
 $retentionDays = max(1, (int) ($_ENV['DOWNLOAD_CLEANUP_RETENTION_DAYS'] ?? 30));

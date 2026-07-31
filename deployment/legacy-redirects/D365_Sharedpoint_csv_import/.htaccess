@@ -1,0 +1,2 @@
+RewriteEngine On
+RewriteRule ^(.*)$ /prod/D365_Sharedpoint_csv_import/$1 [R=302,L,NE]

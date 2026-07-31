@@ -10,6 +10,7 @@ temp/
 logs/
 .worktrees/
 .superpowers/
+deployment/releases/
 
 # Composer dependencies
 vendor/

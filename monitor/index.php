@@ -3,10 +3,21 @@ session_start();
 
 require __DIR__ . '/../vendor/autoload.php';
 
+use App\Config\EnvironmentGuard;
+use App\Config\EnvironmentBanner;
 use Dotenv\Dotenv;
 
+$rootDir = dirname(__DIR__);
 $dotenv = Dotenv::createImmutable(__DIR__ . '/../config');
 $dotenv->load();
+$appEnvironment = EnvironmentGuard::validate($_ENV, $rootDir, true);
+if ($appEnvironment['APP_ENV'] === 'UAT') {
+    ob_start(static fn(string $html): string => EnvironmentBanner::inject(
+        $html,
+        $appEnvironment['APP_ENV'],
+        $appEnvironment['APP_RELEASE']
+    ));
+}
 
 function db()
 {

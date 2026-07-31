@@ -4,6 +4,11 @@ require __DIR__ . '/bootstrap.php';
 
 $files = [
     __DIR__ . '/Config/AppConfigTest.php',
+    __DIR__ . '/Config/EnvironmentGuardTest.php',
+    __DIR__ . '/Config/EnvironmentBannerTest.php',
+    __DIR__ . '/Database/MigrationRunnerTest.php',
+    __DIR__ . '/Database/SchemaInventoryTest.php',
+    __DIR__ . '/Database/BackupCheckpointValidatorTest.php',
     __DIR__ . '/Support/LoggerTest.php',
     __DIR__ . '/Queue/FileQueueRepositoryTest.php',
     __DIR__ . '/SharePoint/SharePointClientTest.php',

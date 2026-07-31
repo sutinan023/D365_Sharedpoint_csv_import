@@ -1,21 +1,26 @@
-$TaskNames = @(
-    "D365 SharePoint CSV Import",
-    "D365 SharePoint CSV Download Cleanup"
+param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('UAT', 'Production')]
+    [string] $Environment,
+    [switch] $PlanOnly
 )
 
-foreach ($TaskName in $TaskNames) {
-    $Task = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+$suffix = if ($Environment -eq 'UAT') { 'UAT' } else { 'PROD' }
+$taskNames = @(
+    "D365 SharePoint CSV Import [$suffix]",
+    "D365 SharePoint CSV Download Cleanup [$suffix]"
+)
 
-    if (-not $Task) {
-        Write-Host "Scheduled task not found: $TaskName"
-        continue
+if ($PlanOnly) {
+    $taskNames | ConvertTo-Json
+    return
+}
+
+foreach ($taskName in $taskNames) {
+    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    if (-not $task) { continue }
+    if ($task.State -eq 'Running') {
+        Stop-ScheduledTask -TaskName $taskName
     }
-
-    if ($Task.State -eq "Running") {
-        Stop-ScheduledTask -TaskName $TaskName
-        Start-Sleep -Seconds 3
-    }
-
-    Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false
-    Write-Host "Scheduled task uninstalled: $TaskName"
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false
 }

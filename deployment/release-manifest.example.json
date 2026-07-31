@@ -1,0 +1,23 @@
+{
+  "release_id": "2026-07-31.1",
+  "projects": {
+    "D365_Sharedpoint_csv_import": {
+      "git_sha": "0000000000000000000000000000000000000000"
+    },
+    "D365_file_csv_import": {
+      "git_sha": "0000000000000000000000000000000000000000"
+    },
+    "finance_report": {
+      "git_sha": "0000000000000000000000000000000000000000"
+    }
+  },
+  "migrations": {
+    "D365_Sharedpoint_csv_import": [
+      "000_create_schema_migrations.sql",
+      "001_create_sharepoint_file_queue.sql",
+      "002_add_pending_archive_to_import_files_status.sql"
+    ],
+    "D365_file_csv_import": [],
+    "finance_report": []
+  }
+}

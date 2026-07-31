@@ -83,7 +83,7 @@ DB_USER=root
 DB_PASS=
 
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=123456
+ADMIN_PASSWORD=
 
 Database migration:
 Run these migrations before enabling the new scheduler:

@@ -1,6 +1,7 @@
 <?php
 
 use App\Config\AppConfig;
+use App\Config\EnvironmentGuard;
 use App\Import\ImportQueue;
 use App\Import\PaymentBeforePostImporter;
 use App\Queue\FileQueueRepository;
@@ -15,9 +16,15 @@ require dirname(__DIR__) . '/vendor/autoload.php';
 $rootDir = dirname(__DIR__);
 $dotenv = Dotenv::createImmutable($rootDir . '/config');
 $dotenv->safeLoad();
+$appEnvironment = EnvironmentGuard::validate($_ENV, $rootDir, true);
 
 $config = AppConfig::fromEnv($rootDir);
 $logger = new Logger($rootDir . '/logs/import.log');
+$logger->info(sprintf(
+    'Runtime configured environment=%s release=%s',
+    $appEnvironment['APP_ENV'],
+    $appEnvironment['APP_RELEASE']
+));
 
 $pdo = new PDO(
     sprintf('mysql:host=%s;dbname=%s;charset=utf8mb4', $_ENV['DB_HOST'], $_ENV['DB_NAME']),
