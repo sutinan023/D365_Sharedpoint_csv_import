@@ -15,6 +15,7 @@ try {
     Set-Content (Join-Path $sourceRoot 'modified.txt') 'source version'
     Set-Content (Join-Path $sourceRoot 'equal.txt') 'same content'
     Set-Content (Join-Path $sourceRoot 'hidden.txt') 'hidden source file'
+    Set-Content (Join-Path $sourceRoot 'ตัวอย่าง.txt') 'unicode source file'
     Set-Content (Join-Path $sourceRoot '.gitignore') ".env`nlogs/`nignored-artifact.txt"
     Set-Content (Join-Path $sourceRoot '.env') 'DB_PASS=must-not-deploy'
     Set-Content (Join-Path $sourceRoot 'ignored-artifact.txt') 'must-not-deploy'
@@ -51,6 +52,7 @@ try {
     }
     $comparison = & $scriptPath @arguments -CompareOnly | Out-String
     Assert-True ($comparison -match '(?m)^New:\s+new\.txt\s*$') 'New file was not listed.'
+    Assert-True ($comparison -match '(?m)^New:\s+ตัวอย่าง\.txt\s*$') 'Unicode tracked file was not listed.'
     Assert-True ($comparison -match '(?m)^Modified:\s+modified\.txt\s*$') 'Modified file was not listed.'
     Assert-True ($comparison -match '(?m)^Deleted:\s+removed\.txt\s*$') 'Deleted file was not listed.'
     Assert-True ($comparison -notmatch '(?m)equal\.txt') 'Equal file was listed.'

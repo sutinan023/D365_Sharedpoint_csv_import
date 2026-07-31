@@ -116,7 +116,7 @@ if ($Environment -eq 'Production') {
 }
 
 $sourceFiles = @{}
-$trackedPaths = @(& git -C $source ls-files)
+$trackedPaths = @(& git -c core.quotepath=false -C $source ls-files)
 if ($LASTEXITCODE -ne 0) {
     throw 'Unable to list tracked release files.'
 }
