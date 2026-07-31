@@ -21,6 +21,9 @@ try {
     Set-Content (Join-Path $sourceRoot 'ignored-artifact.txt') 'must-not-deploy'
     New-Item -ItemType Directory (Join-Path $sourceRoot 'logs') | Out-Null
     Set-Content (Join-Path $sourceRoot 'logs\ignored.log') 'excluded log'
+    New-Item -ItemType Directory (Join-Path $sourceRoot 'example') | Out-Null
+    Set-Content (Join-Path $sourceRoot 'example\tracked-example.csv') 'must-not-deploy'
+    Set-Content (Join-Path $sourceRoot 'example\tracked-example.CSV') 'must-not-deploy-case-insensitive'
 
     & git -C $sourceRoot init --quiet
     & git -C $sourceRoot config user.email 'test@example.invalid'
@@ -61,6 +64,7 @@ try {
     Assert-True ($comparison -notmatch '(?m)equal\.txt') 'Equal file was listed.'
     Assert-True ($comparison -notmatch '(?m)\.env') 'Environment file was included.'
     Assert-True ($comparison -notmatch 'ignored-artifact') 'Git-ignored artifact was included.'
+    Assert-True ($comparison -notmatch '(?mi)^(?:New|Modified|Deleted):\s+.*\.csv\s*$') 'Tracked CSV was included in the deployment payload.'
 
     Set-Content (Join-Path $sourceRoot 'dirty.txt') 'not committed'
     try {
@@ -73,6 +77,8 @@ try {
 
     & $scriptPath @arguments -ApprovalToken 'APPROVE UAT test-release-1' | Out-Null
     Assert-True ((Get-Content (Join-Path $destinationRoot 'new.txt') -Raw) -match 'new source file') 'New file was not deployed.'
+    Assert-True (-not (Test-Path (Join-Path $destinationRoot 'example\tracked-example.csv'))) 'Tracked CSV was deployed.'
+    Assert-True (-not (Test-Path (Join-Path $destinationRoot 'example\tracked-example.CSV'))) 'Uppercase tracked CSV was deployed.'
     Assert-True (-not (Test-Path (Join-Path $destinationRoot 'removed.txt'))) 'Deleted file remained.'
     Assert-True (Test-Path (Join-Path $destinationRoot '.deployment\current-release.json')) 'Deployment metadata missing.'
     $backups = Get-ChildItem (Join-Path $testRoot '.deploy-backups') -Directory -Recurse

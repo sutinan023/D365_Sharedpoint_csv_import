@@ -22,7 +22,7 @@ param(
 
     [string[]] $Exclude = @(
         '.git', '.agents', '.worktrees', 'vendor', '.env', 'config\.env',
-        '*.log', '*.tmp', 'download', 'archive', 'processed', 'error', 'temp', 'tmp', 'logs',
+        '*.log', '*.tmp', '*.csv', 'download', 'archive', 'processed', 'error', 'temp', 'tmp', 'logs',
         '.deploy-backups', '.deployment'
     )
 )
