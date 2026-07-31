@@ -32,6 +32,8 @@ try {
     Set-Content (Join-Path $destinationRoot 'modified.txt') 'destination version'
     Set-Content (Join-Path $destinationRoot 'equal.txt') 'same content'
     Set-Content (Join-Path $destinationRoot 'removed.txt') 'stale destination file'
+    New-Item -ItemType Directory (Join-Path $destinationRoot 'tmp') | Out-Null
+    Set-Content (Join-Path $destinationRoot 'tmp\uat_config_check.json') 'runtime-only configuration check'
 
     $manifestPath = Join-Path $testRoot 'release.json'
     [ordered]@{
@@ -55,6 +57,7 @@ try {
     Assert-True ($comparison -match '(?m)^New:\s+ตัวอย่าง\.txt\s*$') 'Unicode tracked file was not listed.'
     Assert-True ($comparison -match '(?m)^Modified:\s+modified\.txt\s*$') 'Modified file was not listed.'
     Assert-True ($comparison -match '(?m)^Deleted:\s+removed\.txt\s*$') 'Deleted file was not listed.'
+    Assert-True ($comparison -notmatch '(?m)^Deleted:\s+tmp\\uat_config_check\.json\s*$') 'Runtime tmp file was listed for deletion.'
     Assert-True ($comparison -notmatch '(?m)equal\.txt') 'Equal file was listed.'
     Assert-True ($comparison -notmatch '(?m)\.env') 'Environment file was included.'
     Assert-True ($comparison -notmatch 'ignored-artifact') 'Git-ignored artifact was included.'
