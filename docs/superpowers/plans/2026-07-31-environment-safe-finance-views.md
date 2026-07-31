@@ -20,15 +20,17 @@
 
 ---
 
-### Task 1: Add failing migration contract tests
+### Task 1: Add migration contract tests and environment-safe views
 
 **Files:**
 - Create: `tests/Database/FinanceViewMigrationContractTest.php`
 - Modify: `tests/run.php`
+- Create: `database/migrations/004_create_vw_import_report.sql`
+- Create: `database/migrations/005_create_v_tbpayin_from_payment_outbound.sql`
 
 **Interfaces:**
-- Consumes: SQL files in `database/migrations`.
-- Produces: two test cases that enforce migration filenames, security mode, environment isolation, dependencies, and output columns.
+- Consumes: migration 003's nullable `stg_received_outbound.effective_date`, plus existing staging, payment outbound, and payment mail tables.
+- Produces: two contract tests plus `vw_import_report` and `v_tbpayin_from_payment_outbound` in whichever database the migration connection selected.
 
 - [ ] **Step 1: Install the committed PHP dependencies in the worktree**
 
@@ -103,18 +105,7 @@ Expected: FAIL with `Migration missing: 004_create_vw_import_report.sql`. The fa
 
 ---
 
-### Task 2: Add both environment-safe view migrations
-
-**Files:**
-- Create: `database/migrations/004_create_vw_import_report.sql`
-- Create: `database/migrations/005_create_v_tbpayin_from_payment_outbound.sql`
-- Test: `tests/Database/FinanceViewMigrationContractTest.php`
-
-**Interfaces:**
-- Consumes: migration 003's nullable `stg_received_outbound.effective_date`, plus existing staging, payment outbound, and payment mail tables.
-- Produces: `vw_import_report` and `v_tbpayin_from_payment_outbound` in whichever database the migration connection selected.
-
-- [ ] **Step 1: Add migration 004 only**
+- [ ] **Step 5: Add migration 004 only**
 
 Create `database/migrations/004_create_vw_import_report.sql`:
 
@@ -141,13 +132,13 @@ SELECT
 FROM `stg_received_outbound` AS r;
 ```
 
-- [ ] **Step 2: Run the tests and verify the second RED boundary**
+- [ ] **Step 6: Run the tests and verify the second RED boundary**
 
 Run `C:\xampp\php\php.exe tests\run.php`.
 
 Expected: the 004 contract passes, then the suite fails with `Migration missing: 005_create_v_tbpayin_from_payment_outbound.sql`.
 
-- [ ] **Step 3: Add migration 005**
+- [ ] **Step 7: Add migration 005**
 
 Create `database/migrations/005_create_v_tbpayin_from_payment_outbound.sql`:
 
@@ -206,7 +197,7 @@ LEFT JOIN (
 WHERE po.`eft_file_name` IS NOT NULL AND po.`eft_file_name` <> '';
 ```
 
-- [ ] **Step 4: Run the focused and full PHP tests and verify GREEN**
+- [ ] **Step 8: Run the focused and full PHP tests and verify GREEN**
 
 Run:
 
@@ -216,7 +207,7 @@ C:\xampp\php\php.exe tests\run.php
 
 Expected: all PHP tests pass, including the two new finance view migration contracts.
 
-- [ ] **Step 5: Commit the migrations and contract tests**
+- [ ] **Step 9: Commit the migrations and contract tests**
 
 ```powershell
 git add tests/Database/FinanceViewMigrationContractTest.php tests/run.php database/migrations/004_create_vw_import_report.sql database/migrations/005_create_v_tbpayin_from_payment_outbound.sql
@@ -225,7 +216,7 @@ git commit -m "feat: add environment-safe finance views"
 
 ---
 
-### Task 3: Make release manifests include migrations 004 and 005
+### Task 2: Make release manifests include migrations 004 and 005
 
 **Files:**
 - Modify: `tests/test_release_manifest.ps1`
@@ -286,7 +277,7 @@ git commit -m "fix: include finance views in release manifests"
 
 ---
 
-### Task 4: Verify the complete code release
+### Task 3: Verify the complete code release
 
 **Files:**
 - Verify only; no new production files.
@@ -324,7 +315,7 @@ Expected: `rg` has no matches, `git diff --check` has no output, and Git status 
 
 ---
 
-### Task 5: Build and compare the immutable UAT release
+### Task 4: Build and compare the immutable UAT release
 
 **Files:**
 - Generate (ignored audit artifact): `deployment/releases/2026-07-31.9.json`
@@ -363,11 +354,11 @@ Run `tools\sync_to_server.ps1 -Environment UAT -ReleaseId 2026-07-31.9 -Manifest
 git -C $financeReleaseRoot status --porcelain --untracked-files=all
 ```
 
-Expected: no output. Remove this worktree only after all three UAT project deployments in Task 6 succeed.
+Expected: no output. Remove this worktree only after all three UAT project deployments in Task 5 succeed.
 
 ---
 
-### Task 6: Deploy and prove release 2026-07-31.9 on UAT
+### Task 5: Deploy and prove release 2026-07-31.9 on UAT
 
 **Files:**
 - Deploy only to: `C:\xampp\htdocs\uat\D365_Sharedpoint_csv_import`
@@ -442,7 +433,7 @@ Record the receipt SHA-256. Do not use the 008 receipt for release 009.
 
 ---
 
-### Task 7: Re-run Production readiness and stop at the cutover gate
+### Task 6: Re-run Production readiness and stop at the cutover gate
 
 **Files:**
 - Read-only comparison and inventory outputs only.
