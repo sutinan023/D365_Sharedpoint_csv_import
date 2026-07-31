@@ -8,7 +8,8 @@ function Assert-True([bool] $Condition, [string] $Message) {
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('sync-to-server-test-{0}' -f [guid]::NewGuid())
 $sourceRoot = Join-Path $testRoot 'source'
 $destinationRoot = Join-Path $testRoot 'destination'
-New-Item -ItemType Directory -Path $sourceRoot, $destinationRoot | Out-Null
+$customDestinationRoot = Join-Path $testRoot 'custom-destination'
+New-Item -ItemType Directory -Path $sourceRoot, $destinationRoot, $customDestinationRoot | Out-Null
 
 try {
     Set-Content (Join-Path $sourceRoot 'new.txt') 'new source file'
@@ -24,6 +25,9 @@ try {
     New-Item -ItemType Directory (Join-Path $sourceRoot 'example') | Out-Null
     Set-Content (Join-Path $sourceRoot 'example\tracked-example.csv') 'must-not-deploy'
     Set-Content (Join-Path $sourceRoot 'example\tracked-example.CSV') 'must-not-deploy-case-insensitive'
+    New-Item -ItemType Directory (Join-Path $sourceRoot 'payload') | Out-Null
+    Set-Content (Join-Path $sourceRoot 'payload\payload.CSV') 'must-remain-excluded-with-caller-overrides'
+    Set-Content (Join-Path $sourceRoot 'payload\needed.php') '<?php echo "needed";'
 
     & git -C $sourceRoot init --quiet
     & git -C $sourceRoot config user.email 'test@example.invalid'
@@ -65,6 +69,15 @@ try {
     Assert-True ($comparison -notmatch '(?m)\.env') 'Environment file was included.'
     Assert-True ($comparison -notmatch 'ignored-artifact') 'Git-ignored artifact was included.'
     Assert-True ($comparison -notmatch '(?mi)^(?:New|Modified|Deleted):\s+.*\.csv\s*$') 'Tracked CSV was included in the deployment payload.'
+
+    $customArguments = $arguments.Clone()
+    $customArguments.DestinationRoot = $customDestinationRoot
+    $customComparison = & $scriptPath @customArguments -Exclude '*.log' -CompareOnly | Out-String
+    Assert-True ($customComparison -match '(?m)^New:\s+payload\\needed\.php\s*$') 'Caller exclusion removed an adjacent required code file.'
+    Assert-True ($customComparison -notmatch '(?mi)^(?:New|Modified|Deleted):\s+.*\.csv\s*$') 'Caller exclusion override allowed a CSV into CompareOnly.'
+    & $scriptPath @customArguments -Exclude '*.log' -ApprovalToken 'APPROVE UAT test-release-1' | Out-Null
+    Assert-True (Test-Path (Join-Path $customDestinationRoot 'payload\needed.php')) 'Adjacent required code file was not deployed with caller exclusions.'
+    Assert-True (-not (Test-Path (Join-Path $customDestinationRoot 'payload\payload.CSV'))) 'Caller exclusion override allowed a CSV to deploy.'
 
     Set-Content (Join-Path $sourceRoot 'dirty.txt') 'not committed'
     try {

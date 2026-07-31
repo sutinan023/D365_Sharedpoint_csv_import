@@ -22,7 +22,7 @@ param(
 
     [string[]] $Exclude = @(
         '.git', '.agents', '.worktrees', 'vendor', '.env', 'config\.env',
-        '*.log', '*.tmp', '*.csv', 'download', 'archive', 'processed', 'error', 'temp', 'tmp', 'logs',
+        '*.log', '*.tmp', 'download', 'archive', 'processed', 'error', 'temp', 'tmp', 'logs',
         '.deploy-backups', '.deployment'
     )
 )
@@ -51,6 +51,9 @@ function Test-ExcludedPath {
     }
     return $false
 }
+
+$mandatoryExclude = @('*.csv')
+$effectiveExclude = @($Exclude) + $mandatoryExclude
 
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent $PSScriptRoot
@@ -123,7 +126,7 @@ if ($LASTEXITCODE -ne 0) {
 foreach ($trackedPath in $trackedPaths) {
     $relative = $trackedPath.Replace('/', '\')
     $file = Get-Item -LiteralPath (Join-Path $source $relative)
-    if (-not (Test-ExcludedPath $relative $Exclude)) {
+    if (-not (Test-ExcludedPath $relative $effectiveExclude)) {
         $sourceFiles[$relative.ToLowerInvariant()] = $file
     }
 }
@@ -141,7 +144,7 @@ foreach ($entry in $sourceFiles.GetEnumerator()) {
 }
 foreach ($file in Get-ChildItem -LiteralPath $destination -File -Recurse -Force) {
     $relative = $file.FullName.Substring($destination.Length).TrimStart('\', '/')
-    if (-not (Test-ExcludedPath $relative $Exclude) -and -not $sourceFiles.ContainsKey($relative.ToLowerInvariant())) {
+    if (-not (Test-ExcludedPath $relative $effectiveExclude) -and -not $sourceFiles.ContainsKey($relative.ToLowerInvariant())) {
         $changes.Add([pscustomobject]@{ Type='Deleted'; RelativePath=$relative; SourcePath=$null; DestinationPath=$file.FullName })
     }
 }
