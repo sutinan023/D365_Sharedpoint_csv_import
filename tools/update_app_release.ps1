@@ -17,7 +17,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $safeReleasePattern = '[A-Za-z0-9][A-Za-z0-9._-]{0,127}'
 $effectiveTestFault = if ($LocalTestMode -and -not [string]::IsNullOrWhiteSpace($env:D365_APP_RELEASE_TEST_FAULT)) { $env:D365_APP_RELEASE_TEST_FAULT } else { 'None' }
-if ($effectiveTestFault -notin @('None', 'AfterFirstWrite', 'AfterVerification', 'DuringAudit')) { throw 'Unknown TestFault value.' }
+if ($effectiveTestFault -notin @('None', 'AfterFirstTempFlush', 'AfterFirstWrite', 'AfterVerification', 'DuringAudit')) { throw 'Unknown TestFault value.' }
+if (-not $LocalTestMode -and -not [string]::IsNullOrWhiteSpace($env:D365_APP_RELEASE_TEST_EDIT_AFTER_READ)) { throw 'APP_RELEASE test hooks are forbidden outside LocalTestMode.' }
 
 function Get-CanonicalPath {
     param([string] $Path)
@@ -142,6 +143,44 @@ function Get-ReplacementBytes {
     return $combined
 }
 
+function Set-FileBytesAtomically {
+    param(
+        [string] $Path,
+        [byte[]] $Bytes,
+        [string] $ExpectedBeforeHash,
+        [switch] $SimulateFailureAfterFlush
+    )
+    $directory = Split-Path -Parent $Path
+    $temporaryPath = Join-Path $directory ('.app-release-{0}.tmp' -f [guid]::NewGuid().ToString('N'))
+    $replaceBackupPath = "$temporaryPath.replace-backup"
+    if ([IO.Path]::GetPathRoot((Get-CanonicalPath $temporaryPath)) -ine [IO.Path]::GetPathRoot((Get-CanonicalPath $Path))) {
+        throw 'Atomic replacement temp file must be on the same volume as the live environment file.'
+    }
+    try {
+        $stream = [IO.FileStream]::new($temporaryPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None, 4096, [IO.FileOptions]::WriteThrough)
+        try {
+            $stream.Write($Bytes, 0, $Bytes.Length)
+            $stream.Flush($true)
+        } finally { $stream.Dispose() }
+        if ((Get-FileHash -LiteralPath $temporaryPath -Algorithm SHA256).Hash.ToLowerInvariant() -cne (Get-Sha256 $Bytes)) {
+            throw 'Atomic replacement temp checksum failed.'
+        }
+        if ($SimulateFailureAfterFlush) { throw 'Simulated failure after replacement flush.' }
+
+        # Re-read immediately before replacement so a concurrent editor is never overwritten.
+        $actualBeforeHash = Get-Sha256 ([IO.File]::ReadAllBytes($Path))
+        if ($actualBeforeHash -cne $ExpectedBeforeHash) { throw 'Environment file changed after validation; concurrent edit was preserved.' }
+        Set-Acl -LiteralPath $temporaryPath -AclObject (Get-Acl -LiteralPath $Path)
+        [IO.File]::Replace($temporaryPath, $Path, $replaceBackupPath, $true)
+        if ((Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -cne (Get-Sha256 $Bytes)) {
+            throw 'APP_RELEASE atomic replacement verification failed.'
+        }
+    } finally {
+        if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) { Remove-Item -LiteralPath $temporaryPath -Force }
+        if (Test-Path -LiteralPath $replaceBackupPath -PathType Leaf) { Remove-Item -LiteralPath $replaceBackupPath -Force }
+    }
+}
+
 $segment = if ($Environment -eq 'UAT') { 'uat' } else { 'prod' }
 $expectedEnvironment = if ($Environment -eq 'UAT') { 'UAT' } else { 'PRODUCTION' }
 $expectedDatabase = if ($Environment -eq 'UAT') { 'D365_finance' } else { 'D365_finance_prod' }
@@ -200,14 +239,18 @@ try {
     }
 
     $updates = @($records | ForEach-Object {
-        [pscustomobject]@{ Record = $_; NewBytes = Get-ReplacementBytes $_ $ReleaseId; BeforeHash = Get-Sha256 $_.State.Bytes; AfterHash = $null }
+        [pscustomobject]@{ Record = $_; NewBytes = Get-ReplacementBytes $_ $ReleaseId; BeforeHash = Get-Sha256 $_.State.Bytes; AfterHash = $null; WasReplaced = $false }
     })
+    if ($LocalTestMode -and $env:D365_APP_RELEASE_TEST_EDIT_AFTER_READ -ceq '1') {
+        [IO.File]::AppendAllText($updates[0].Record.Path, '# concurrent external edit', [Text.UTF8Encoding]::new($false))
+    }
     $auditFile = Join-Path $auditRootFull ("app-release-update-{0}-{1}-{2}.json" -f $segment, (Get-Date -Format 'yyyyMMdd-HHmmssfff'), ([guid]::NewGuid().ToString('N')))
     $mutationStarted = $false
     try {
         for ($index = 0; $index -lt $updates.Count; $index++) {
+            Set-FileBytesAtomically -Path $updates[$index].Record.Path -Bytes $updates[$index].NewBytes -ExpectedBeforeHash $updates[$index].BeforeHash -SimulateFailureAfterFlush:($effectiveTestFault -ceq 'AfterFirstTempFlush' -and $index -eq 0)
+            $updates[$index].WasReplaced = $true
             $mutationStarted = $true
-            [IO.File]::WriteAllBytes($updates[$index].Record.Path, $updates[$index].NewBytes)
             if ($effectiveTestFault -ceq 'AfterFirstWrite' -and $index -eq 0) { throw 'Simulated failure after first write.' }
             $actualHash = (Get-FileHash -LiteralPath $updates[$index].Record.Path -Algorithm SHA256).Hash.ToLowerInvariant()
             $expectedHash = Get-Sha256 $updates[$index].NewBytes
@@ -233,8 +276,10 @@ try {
         $failure = $_
         if ($mutationStarted) {
             $rollbackErrors = @()
-            foreach ($update in $updates) {
-                try { [IO.File]::WriteAllBytes($update.Record.Path, $update.Record.State.Bytes) }
+            $replacedUpdates = @($updates | Where-Object WasReplaced)
+            [array]::Reverse($replacedUpdates)
+            foreach ($update in $replacedUpdates) {
+                try { Set-FileBytesAtomically -Path $update.Record.Path -Bytes $update.Record.State.Bytes -ExpectedBeforeHash (Get-Sha256 $update.NewBytes) }
                 catch { $rollbackErrors += $update.Record.Path }
             }
             if (Test-Path -LiteralPath $auditFile -PathType Leaf) {

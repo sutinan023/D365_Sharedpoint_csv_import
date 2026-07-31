@@ -148,6 +148,21 @@ try {
         Assert-Throws { & $scriptPath -BackupPath $objectSourcePath -ExpectedSourceSha256 $objectHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$objectSourcePath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'executable'
     }
 
+    # Break caught: comments/quotes split dangerous database-selection/DDL tokens and bypass regex guards.
+    foreach ($dangerousSql in @(
+        'USE/**/`D365_finance`;',
+        'USE /* separator */ "D365_finance";',
+        'DROP/**/DATABASE/**/`D365_finance`;',
+        'CREATE/* separator */SCHEMA `D365_finance_shadow`;',
+        'ALTER/**/DATABASE `D365_finance` CHARACTER SET utf8mb4;',
+        '/*!50003 DROP*/ /**/ /*!50003 DATABASE*/ `D365_finance`;'
+    )) {
+        $dangerousPath = Join-Path $testRoot ('dangerous-{0}.sql' -f [guid]::NewGuid())
+        [IO.File]::WriteAllText($dangerousPath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$dangerousSql`n"), (New-Object Text.UTF8Encoding($false)))
+        $dangerousHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dangerousPath).Hash.ToLowerInvariant()
+        Assert-Throws { & $scriptPath -BackupPath $dangerousPath -ExpectedSourceSha256 $dangerousHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$dangerousPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'dangerous database|CREATE DATABASE or USE'
+    }
+
     $junctionPath = Join-Path $testRoot 'junction-output'
     $junctionCreated = $false
     try {

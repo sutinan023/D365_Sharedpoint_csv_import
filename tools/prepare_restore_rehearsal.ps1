@@ -189,11 +189,57 @@ function Get-SqlLexicalSpans {
 }
 
 $sourceLexicalSpans = Get-SqlLexicalSpans -Text $sourceText
-if ($sourceText -match '(?i)\bCREATE\s+DATABASE\b|\bUSE\s+(?:`[^`]+`|[A-Za-z0-9_]+)\b') {
-    throw 'Source dump contains CREATE DATABASE or USE statements and cannot be isolated safely.'
+function Get-SqlLexicalTokens {
+    param([string] $Text, [object[]] $ProtectedSpans)
+    $tokens = New-Object 'System.Collections.Generic.List[object]'
+    $protectedIndex = 0
+    $index = 0
+    while ($index -lt $Text.Length) {
+        while ($protectedIndex -lt $ProtectedSpans.Count -and ($ProtectedSpans[$protectedIndex].Index + $ProtectedSpans[$protectedIndex].Length) -le $index) { $protectedIndex++ }
+        if ($protectedIndex -lt $ProtectedSpans.Count -and $index -ge $ProtectedSpans[$protectedIndex].Index -and $index -lt ($ProtectedSpans[$protectedIndex].Index + $ProtectedSpans[$protectedIndex].Length)) {
+            $index = $ProtectedSpans[$protectedIndex].Index + $ProtectedSpans[$protectedIndex].Length
+            continue
+        }
+        $character = $Text[$index]
+        if ([char]::IsWhiteSpace($character)) { $index++; continue }
+        if ($character -eq '`') {
+            $start = $index++
+            $builder = New-Object Text.StringBuilder
+            while ($index -lt $Text.Length) {
+                if ($Text[$index] -eq '`') {
+                    if (($index + 1) -lt $Text.Length -and $Text[$index + 1] -eq '`') { [void]$builder.Append('`'); $index += 2; continue }
+                    $index++; break
+                }
+                [void]$builder.Append($Text[$index]); $index++
+            }
+            [void]$tokens.Add([pscustomobject]@{ Value=$builder.ToString(); Kind='QuotedIdentifier'; Index=$start })
+            continue
+        }
+        if ([char]::IsLetter($character) -or $character -eq '_') {
+            $start = $index++
+            while ($index -lt $Text.Length -and ([char]::IsLetterOrDigit($Text[$index]) -or $Text[$index] -eq '_' -or $Text[$index] -eq '$')) { $index++ }
+            [void]$tokens.Add([pscustomobject]@{ Value=$Text.Substring($start,$index-$start).ToUpperInvariant(); Kind='Word'; Index=$start })
+            continue
+        }
+        [void]$tokens.Add([pscustomobject]@{ Value=[string]$character; Kind='Symbol'; Index=$index })
+        $index++
+    }
+    return [object[]]$tokens.ToArray()
 }
-if ($sourceText -match '(?is)\b(?:CREATE|DROP|ALTER)\b[^;]{0,1000}\b(?:TRIGGER|PROCEDURE|FUNCTION|EVENT)\b') {
-    throw 'Source dump contains an executable database object and cannot be isolated safely.'
+
+$sqlTokens = @(Get-SqlLexicalTokens -Text $sourceText -ProtectedSpans $sourceLexicalSpans.ProtectedSpans)
+for ($tokenIndex = 0; $tokenIndex -lt $sqlTokens.Count; $tokenIndex++) {
+    $token = $sqlTokens[$tokenIndex]
+    if ($token.Kind -ne 'Word') { continue }
+    if ($token.Value -ceq 'USE') { throw 'Source dump contains a dangerous database selection statement and cannot be isolated safely.' }
+    if ($token.Value -in @('CREATE','DROP','ALTER')) {
+        for ($lookahead = $tokenIndex + 1; $lookahead -lt $sqlTokens.Count -and $sqlTokens[$lookahead].Value -cne ';'; $lookahead++) {
+            if ($sqlTokens[$lookahead].Kind -ne 'Word') { continue }
+            if ($sqlTokens[$lookahead].Value -in @('DATABASE','SCHEMA')) { throw 'Source dump contains a dangerous database DDL statement and cannot be isolated safely.' }
+            if ($sqlTokens[$lookahead].Value -in @('TRIGGER','PROCEDURE','FUNCTION','EVENT')) { throw 'Source dump contains an executable database object and cannot be isolated safely.' }
+            break
+        }
+    }
 }
 
 $definerPattern = '(?is)\bDEFINER\s*=\s*`[^`]+`\s*@\s*`[^`]+`\s+SQL\s+SECURITY\s+DEFINER\b'

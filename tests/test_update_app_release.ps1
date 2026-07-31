@@ -134,6 +134,39 @@ try {
         Assert-SnapshotsUnchanged $snapshots
     }
 
+    # Break caught: a writer changes a live .env after validation and the updater overwrites it.
+    $concurrentRoot = New-TestEnvironment -Name concurrent-edit
+    $concurrentSnapshots = Get-EnvironmentSnapshots $concurrentRoot
+    $concurrentPath = Get-EnvironmentFilePath $concurrentRoot 'D365_Sharedpoint_csv_import'
+    $previousConcurrentHook = $env:D365_APP_RELEASE_TEST_EDIT_AFTER_READ
+    try {
+        $env:D365_APP_RELEASE_TEST_EDIT_AFTER_READ = '1'
+        Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $concurrentRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'changed after validation|concurrent'
+    } finally { $env:D365_APP_RELEASE_TEST_EDIT_AFTER_READ = $previousConcurrentHook }
+    if ((Get-Content -LiteralPath $concurrentPath -Raw) -notmatch '# concurrent external edit') { throw 'Concurrent external edit was not preserved.' }
+    foreach ($path in $concurrentSnapshots.Keys | Where-Object { $_ -cne $concurrentPath }) {
+        if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($path)) -cne [Convert]::ToBase64String($concurrentSnapshots[$path])) { throw 'Concurrency rejection changed an unrelated environment file.' }
+    }
+
+    # Break caught: a crash after writing replacement bytes truncates/replaces the live file.
+    $atomicRoot = New-TestEnvironment -Name atomic-flush
+    $atomicSnapshots = Get-EnvironmentSnapshots $atomicRoot
+    $previousFault = $env:D365_APP_RELEASE_TEST_FAULT
+    try {
+        $env:D365_APP_RELEASE_TEST_FAULT = 'AfterFirstTempFlush'
+        Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $atomicRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'Simulated failure after replacement flush'
+    } finally { $env:D365_APP_RELEASE_TEST_FAULT = $previousFault }
+    Assert-SnapshotsUnchanged $atomicSnapshots
+    if (@(Get-ChildItem -LiteralPath $atomicRoot -Recurse -Force -Filter '.app-release-*.tmp').Count -ne 0) { throw 'Atomic updater left a replacement temp file behind.' }
+
+    # File replacement must preserve the existing ACL, not inherit a looser parent ACL.
+    $aclRoot = New-TestEnvironment -Name acl-preserved
+    $aclPath = Get-EnvironmentFilePath $aclRoot 'finance_report'
+    $aclBefore = (Get-Acl -LiteralPath $aclPath).Sddl
+    & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $aclRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' | Out-Null
+    $aclAfter = (Get-Acl -LiteralPath $aclPath).Sddl
+    if ($aclAfter -cne $aclBefore) { throw 'Atomic APP_RELEASE replacement changed the file ACL.' }
+
     foreach ($suffix in @('trailing text')) {
         $malformedRoot = New-TestEnvironment -Name ('malformed-' + [guid]::NewGuid())
         $malformedPath = Join-Path $malformedRoot 'D365_Sharedpoint_csv_import\config\.env'
