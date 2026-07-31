@@ -228,6 +228,7 @@ function Get-SqlLexicalTokens {
 }
 
 $sqlTokens = @(Get-SqlLexicalTokens -Text $sourceText -ProtectedSpans $sourceLexicalSpans.ProtectedSpans)
+$ddlObjectTypes = @('DATABASE','SCHEMA','TRIGGER','PROCEDURE','FUNCTION','EVENT','TABLE','VIEW','INDEX','USER','ROLE','SERVER','TABLESPACE','LOGFILE','SEQUENCE','PACKAGE')
 for ($tokenIndex = 0; $tokenIndex -lt $sqlTokens.Count; $tokenIndex++) {
     $token = $sqlTokens[$tokenIndex]
     if ($token.Kind -ne 'Word') { continue }
@@ -235,9 +236,11 @@ for ($tokenIndex = 0; $tokenIndex -lt $sqlTokens.Count; $tokenIndex++) {
     if ($token.Value -in @('CREATE','DROP','ALTER')) {
         for ($lookahead = $tokenIndex + 1; $lookahead -lt $sqlTokens.Count -and $sqlTokens[$lookahead].Value -cne ';'; $lookahead++) {
             if ($sqlTokens[$lookahead].Kind -ne 'Word') { continue }
-            if ($sqlTokens[$lookahead].Value -in @('DATABASE','SCHEMA')) { throw 'Source dump contains a dangerous database DDL statement and cannot be isolated safely.' }
-            if ($sqlTokens[$lookahead].Value -in @('TRIGGER','PROCEDURE','FUNCTION','EVENT')) { throw 'Source dump contains an executable database object and cannot be isolated safely.' }
-            break
+            $objectType = $sqlTokens[$lookahead].Value
+            if ($objectType -notin $ddlObjectTypes) { continue }
+            if ($objectType -in @('DATABASE','SCHEMA')) { throw 'Source dump contains a dangerous database DDL statement and cannot be isolated safely.' }
+            if ($objectType -in @('TRIGGER','PROCEDURE','FUNCTION','EVENT')) { throw 'Source dump contains an executable database object and cannot be isolated safely.' }
+            break # A recognized safe object type prevents keywords in its body being treated as DDL targets.
         }
     }
 }

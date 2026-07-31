@@ -137,6 +137,8 @@ try {
         'CREATE TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET @x = 1;',
         '/*!50003 CREATE*/ /*!50020 PROCEDURE `p`() SELECT 1 */;',
         'CREATE FUNCTION `f`() RETURNS INT RETURN 1;',
+        'CREATE OR REPLACE PROCEDURE `p`() SELECT 1;',
+        'CREATE/**/OR/**/REPLACE/**/FUNCTION `f`() RETURNS INT RETURN 1;',
         '/*!50106 CREATE*/ /*!50117 EVENT `e` ON SCHEDULE EVERY 1 DAY DO SELECT 1 */;',
         '/*!50003 DROP*/ /*!50032 TRIGGER `t` */;',
         'ALTER PROCEDURE `p` COMMENT ''unsafe'';',
