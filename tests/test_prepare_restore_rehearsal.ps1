@@ -61,6 +61,48 @@ try {
     Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'bad-name' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath (Join-Path $testRoot 'bad-name.sql') -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'database'
     Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance' -OutputPath (Join-Path $testRoot 'alias.sql') -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'different'
     Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath $sourcePath -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'different'
+
+    $dataSourcePath = Join-Path $testRoot 'data-source.sql'
+    $dataOutputPath = Join-Path $testRoot 'data-sanitized.sql'
+    $dataLiteral = "INSERT INTO ``audit_log`` VALUES ('literal ``D365_finance``.``do_not_rewrite``');"
+    [IO.File]::WriteAllText($dataSourcePath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$dataLiteral`n"), (New-Object Text.UTF8Encoding($false)))
+    $dataHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $dataSourcePath).Hash.ToLowerInvariant()
+    & $scriptPath -BackupPath $dataSourcePath -ExpectedSourceSha256 $dataHash `
+        -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' `
+        -OutputPath $dataOutputPath -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 | Out-Null
+    if (([IO.File]::ReadAllText($dataOutputPath)) -notmatch [regex]::Escape($dataLiteral)) {
+        throw 'Sanitizer changed table data outside a view DDL block.'
+    }
+
+    foreach ($objectSql in @(
+        'CREATE TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET @x = 1;',
+        '/*!50003 CREATE*/ /*!50020 PROCEDURE `p`() SELECT 1 */;',
+        'CREATE FUNCTION `f`() RETURNS INT RETURN 1;',
+        '/*!50106 CREATE*/ /*!50117 EVENT `e` ON SCHEDULE EVERY 1 DAY DO SELECT 1 */;'
+    )) {
+        $objectSourcePath = Join-Path $testRoot ('object-{0}.sql' -f [guid]::NewGuid())
+        [IO.File]::WriteAllText($objectSourcePath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$objectSql`n"), (New-Object Text.UTF8Encoding($false)))
+        $objectHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $objectSourcePath).Hash.ToLowerInvariant()
+        Assert-Throws { & $scriptPath -BackupPath $objectSourcePath -ExpectedSourceSha256 $objectHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$objectSourcePath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'executable'
+    }
+
+    $junctionPath = Join-Path $testRoot 'junction-output'
+    $junctionCreated = $false
+    try {
+        New-Item -ItemType Junction -Path $junctionPath -Target $testRoot | Out-Null
+        $junctionCreated = $true
+    } catch {
+        Write-Host 'Junction creation unavailable; path-component detection is covered by implementation.'
+    }
+    if ($junctionCreated) {
+        Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath (Join-Path $junctionPath 'new-output.sql') -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'reparse'
+    }
+
+    $invalidUtf8Path = Join-Path $testRoot 'invalid-utf8.sql'
+    $invalidBytes = [IO.File]::ReadAllBytes($sourcePath) + [byte[]](0xFF)
+    [IO.File]::WriteAllBytes($invalidUtf8Path, $invalidBytes)
+    $invalidUtf8Hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $invalidUtf8Path).Hash.ToLowerInvariant()
+    Assert-Throws { & $scriptPath -BackupPath $invalidUtf8Path -ExpectedSourceSha256 $invalidUtf8Hash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$invalidUtf8Path.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'UTF-8'
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
