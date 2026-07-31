@@ -23,6 +23,15 @@ try {
         }
     }
 
+    $manifestPath = Join-Path $testRoot 'immutable.json'
+    & $scriptPath -ReleaseId 'immutable' -SourceParent $testRoot -OutputPath $manifestPath | Out-Null
+    try {
+        & $scriptPath -ReleaseId 'immutable' -SourceParent $testRoot -OutputPath $manifestPath | Out-Null
+        throw 'Existing release manifest was overwritten.'
+    } catch {
+        if ($_.Exception.Message -notmatch 'immutable') { throw }
+    }
+
     $customManifest = (& $scriptPath -ReleaseId 'custom-roots' `
         -SharePointRoot (Join-Path $testRoot 'D365_Sharedpoint_csv_import') `
         -FileImporterRoot (Join-Path $testRoot 'D365_file_csv_import') `

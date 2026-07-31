@@ -75,6 +75,9 @@ try {
     $backups = Get-ChildItem (Join-Path $testRoot '.deploy-backups') -Directory -Recurse
     Assert-True ($backups.Count -gt 0) 'Immutable backup directory missing.'
 
+    $noChangeDeployment = & $scriptPath @arguments -ApprovalToken 'APPROVE UAT test-release-1' | Out-String
+    Assert-True ($noChangeDeployment -match 'No file changes') 'No-change release did not update metadata.'
+
     try {
         $productionArguments = $arguments.Clone()
         $productionArguments.Environment = 'Production'

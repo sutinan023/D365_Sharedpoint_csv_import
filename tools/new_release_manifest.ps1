@@ -59,6 +59,9 @@ if ($PlanOnly) {
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path (Split-Path -Parent $PSScriptRoot) "deployment\releases\$ReleaseId.json"
 }
+if (Test-Path -LiteralPath $OutputPath) {
+    throw "Release manifest already exists and is immutable: $OutputPath"
+}
 $outputDirectory = Split-Path -Parent $OutputPath
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 $json | Set-Content -LiteralPath $OutputPath -Encoding UTF8

@@ -149,7 +149,10 @@ foreach ($file in Get-ChildItem -LiteralPath $destination -File -Recurse -Force)
 foreach ($change in $changes | Sort-Object Type, RelativePath) {
     Write-Output ('{0}: {1}' -f $change.Type, $change.RelativePath)
 }
-if ($CompareOnly -or $changes.Count -eq 0) { return }
+if ($CompareOnly) { return }
+if ($changes.Count -eq 0) {
+    Write-Output 'No file changes; release metadata will be updated.'
+}
 
 $label = if ($Environment -eq 'UAT') { 'UAT' } else { 'PRODUCTION' }
 $expectedToken = "APPROVE $label $ReleaseId"
