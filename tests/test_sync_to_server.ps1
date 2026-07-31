@@ -30,6 +30,7 @@ try {
     Set-Content (Join-Path $sourceRoot 'payload\needed.php') '<?php echo "needed";'
 
     & git -C $sourceRoot init --quiet
+    & git -C $sourceRoot config core.autocrlf false
     & git -C $sourceRoot config user.email 'test@example.invalid'
     & git -C $sourceRoot config user.name 'Test'
     & git -C $sourceRoot add .
@@ -47,6 +48,8 @@ try {
         release_id = 'test-release-1'
         projects = [ordered]@{
             D365_Sharedpoint_csv_import = [ordered]@{ git_sha = $sha }
+            D365_file_csv_import = [ordered]@{ git_sha = $sha }
+            finance_report = [ordered]@{ git_sha = $sha }
         }
     } | ConvertTo-Json -Depth 5 | Set-Content $manifestPath
 
@@ -78,6 +81,52 @@ try {
     & $scriptPath @customArguments -Exclude '*.log' -ApprovalToken 'APPROVE UAT test-release-1' | Out-Null
     Assert-True (Test-Path (Join-Path $customDestinationRoot 'payload\needed.php')) 'Adjacent required code file was not deployed with caller exclusions.'
     Assert-True (-not (Test-Path (Join-Path $customDestinationRoot 'payload\payload.CSV'))) 'Caller exclusion override allowed a CSV to deploy.'
+
+    # Break caught: deployment reads mutable worktree bytes even though Git status was attested clean.
+    $snapshotDestination = Join-Path $testRoot 'snapshot-destination'
+    New-Item -ItemType Directory -Path $snapshotDestination | Out-Null
+    & git -C $sourceRoot update-index --assume-unchanged new.txt
+    try {
+        Set-Content (Join-Path $sourceRoot 'new.txt') 'mutable worktree attack'
+        $snapshotArguments = $arguments.Clone(); $snapshotArguments.DestinationRoot = $snapshotDestination
+        & $scriptPath @snapshotArguments -ApprovalToken 'APPROVE UAT test-release-1' | Out-Null
+        Assert-True ((Get-Content (Join-Path $snapshotDestination 'new.txt') -Raw) -match 'new source file') 'Deployment bytes did not come from the attested Git commit snapshot.'
+    } finally {
+        & git -C $sourceRoot checkout -- new.txt
+        & git -C $sourceRoot update-index --no-assume-unchanged new.txt
+    }
+
+    # Break caught: duplicate manifest keys are silently collapsed before release validation.
+    $duplicateManifestPath = Join-Path $testRoot 'duplicate-release.json'
+    $manifestText = Get-Content -LiteralPath $manifestPath -Raw
+    [IO.File]::WriteAllText($duplicateManifestPath, $manifestText.Replace('"release_id":  "test-release-1"', '"release_id":  "test-release-1", "release_id": "test-release-1"'), [Text.UTF8Encoding]::new($false))
+    $duplicateArguments = $arguments.Clone(); $duplicateArguments.ManifestPath = $duplicateManifestPath
+    try { & $scriptPath @duplicateArguments -CompareOnly | Out-Null; throw 'Duplicate manifest key was accepted.' } catch { Assert-True ($_.Exception.Message -match 'duplicate') 'Duplicate manifest failed for the wrong reason.' }
+
+    # Break caught: source/manifest changes after initial attestation proceed to destination mutation.
+    $raceDestination = Join-Path $testRoot 'race-destination'
+    New-Item -ItemType Directory -Path $raceDestination | Out-Null
+    $raceArguments = $arguments.Clone(); $raceArguments.DestinationRoot = $raceDestination
+    $previousSourceRace = $env:D365_SYNC_TEST_MUTATE_SOURCE_AFTER_ATTESTATION
+    try {
+        $env:D365_SYNC_TEST_MUTATE_SOURCE_AFTER_ATTESTATION = 'modified.txt'
+        try { & $scriptPath @raceArguments -ApprovalToken 'APPROVE UAT test-release-1' | Out-Null; throw 'Post-attestation source mutation was accepted.' } catch { Assert-True ($_.Exception.Message -match 'changed after attestation|clean') 'Source race failed for the wrong reason.' }
+    } finally {
+        $env:D365_SYNC_TEST_MUTATE_SOURCE_AFTER_ATTESTATION = $previousSourceRace
+        & git -C $sourceRoot checkout -- modified.txt
+    }
+    Assert-True (@(Get-ChildItem -LiteralPath $raceDestination -Force).Count -eq 0) 'Source race mutated the destination before aborting.'
+
+    $manifestBeforeRace = [IO.File]::ReadAllBytes($manifestPath)
+    $previousManifestRace = $env:D365_SYNC_TEST_MUTATE_MANIFEST_AFTER_ATTESTATION
+    try {
+        $env:D365_SYNC_TEST_MUTATE_MANIFEST_AFTER_ATTESTATION = '1'
+        try { & $scriptPath @raceArguments -ApprovalToken 'APPROVE UAT test-release-1' | Out-Null; throw 'Post-attestation manifest mutation was accepted.' } catch { Assert-True ($_.Exception.Message -match 'manifest changed after attestation') 'Manifest race failed for the wrong reason.' }
+    } finally {
+        $env:D365_SYNC_TEST_MUTATE_MANIFEST_AFTER_ATTESTATION = $previousManifestRace
+        [IO.File]::WriteAllBytes($manifestPath, $manifestBeforeRace)
+    }
+    Assert-True (@(Get-ChildItem -LiteralPath $raceDestination -Force).Count -eq 0) 'Manifest race mutated the destination before aborting.'
 
     Set-Content (Join-Path $sourceRoot 'dirty.txt') 'not committed'
     try {

@@ -36,9 +36,15 @@ Apache and Task Scheduler; the script never guesses service accounts.
 6. Deploy UAT with approval token `APPROVE UAT <release-id>`.
 7. Run tests, config checks, one SharePoint sample, one outbound sample, and
    Finance Report read/write smoke tests.
-8. Record UAT approval with `tools\approve_uat_release.ps1`. Production must
-   receive this receipt with `-UatApprovalPath`; the receipt is bound to the
-   manifest SHA-256 and release ID.
+8. Create and ACL-harden `C:\xampp\backups\d365\release-approvals` (or the
+   matching approved UNC path), then record UAT approval with
+   `tools\approve_uat_release.ps1 -AuditRoot <canonical-root>`. The script uses
+   an immutable `CreateNew` filename and binds the approver SID, manifest
+   SHA-256, release ID, and all three project Git SHAs.
+9. Record the receipt SHA-256 independently. Every Production compare/deploy
+   must receive `-UatApprovalPath`, `-ApprovalAuditRoot`, and
+   `-ExpectedUatApprovalSha256`; promotion rejects non-canonical paths, loose
+   ACLs, duplicate JSON keys, or any hash/SHA mismatch.
 
 ## Database safety
 

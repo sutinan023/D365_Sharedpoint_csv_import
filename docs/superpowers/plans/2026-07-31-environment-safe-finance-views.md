@@ -426,6 +426,7 @@ After acceptance, run:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File tools\approve_uat_release.ps1 `
   -ManifestPath deployment\releases\2026-07-31.9.json `
+  -AuditRoot C:\xampp\backups\d365\release-approvals `
   -ApprovalToken 'APPROVE UAT RESULT 2026-07-31.9'
 ```
 
@@ -444,7 +445,7 @@ Record the receipt SHA-256. Do not use the 008 receipt for release 009.
 
 - [ ] **Step 1: Run Production CompareOnly for all three projects**
 
-Use the same exact clean source roots and pass `-Environment Production`, `-UatApprovalPath`, and `-CompareOnly`. Review every New/Modified/Deleted path and confirm secret/runtime exclusions.
+Use the same exact clean source roots and pass `-Environment Production`, `-UatApprovalPath`, `-ApprovalAuditRoot`, `-ExpectedUatApprovalSha256`, and `-CompareOnly`. The expected receipt hash must come from the separately recorded UAT evidence. Review every New/Modified/Deleted path and confirm secret/runtime exclusions.
 
 - [ ] **Step 2: Compare schemas against the reviewed migration set**
 

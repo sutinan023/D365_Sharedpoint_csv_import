@@ -16,8 +16,11 @@ param(
     [string] $SourceRoot,
     [string] $DestinationRoot,
     [string] $UatApprovalPath,
+    [string] $ApprovalAuditRoot = 'C:\xampp\backups\d365\release-approvals',
+    [ValidatePattern('^[0-9a-fA-F]{64}$')][string] $ExpectedUatApprovalSha256,
     [string] $ApprovalToken,
     [switch] $LocalTestMode,
+    [switch] $ProductionApprovalValidationOnly,
     [switch] $CompareOnly,
 
     [string[]] $Exclude = @(
@@ -28,6 +31,19 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'release_security.ps1')
+
+function Assert-AttestedRepositoryState([string]$Root,[string]$ExpectedHead) {
+    $current=(& git -C $Root rev-parse HEAD).Trim();if($LASTEXITCODE-ne0-or$current-cne$ExpectedHead){throw 'Source Git HEAD changed after attestation.'}
+    $state=(& git -C $Root status --porcelain --untracked-files=all|Out-String).Trim();if($LASTEXITCODE-ne0-or$state-ne''){throw 'Source repository changed after attestation and is no longer clean.'}
+}
+function Invoke-GitBytes([string]$Root,[string]$Arguments) {
+    $start=New-Object Diagnostics.ProcessStartInfo;$start.FileName='git.exe';$start.WorkingDirectory=$Root;$start.Arguments=$Arguments;$start.UseShellExecute=$false;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true;$start.CreateNoWindow=$true
+    $process=New-Object Diagnostics.Process;$process.StartInfo=$start;[void]$process.Start();$memory=New-Object IO.MemoryStream;try{$process.StandardOutput.BaseStream.CopyTo($memory);$errorText=$process.StandardError.ReadToEnd();$process.WaitForExit();if($process.ExitCode-ne0){throw "Git snapshot command failed: $errorText"};$memory.ToArray()}finally{$memory.Dispose();$process.Dispose()}
+}
+function Export-GitBlob([string]$Root,[string]$ObjectId,[string]$Path) {
+    $bytes=Invoke-GitBytes $Root "cat-file blob $ObjectId";$parent=Split-Path -Parent $Path;if(-not(Test-Path -LiteralPath $parent)){New-Item -ItemType Directory -Path $parent -Force|Out-Null};$stream=[IO.FileStream]::new($Path,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None);try{$stream.Write($bytes,0,$bytes.Length);$stream.Flush($true)}finally{$stream.Dispose()}
+}
 
 function Get-NormalizedFullPath([string] $Path) {
     return [System.IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
@@ -70,14 +86,16 @@ if ([string]::IsNullOrWhiteSpace($DestinationRoot)) {
 }
 
 if ($LocalTestMode) {
-    if ($Environment -ne 'UAT') {
-        throw 'LocalTestMode is allowed only for UAT.'
+    if ($Environment -ne 'UAT' -and -not ($Environment -eq 'Production' -and $ProductionApprovalValidationOnly)) {
+        throw 'LocalTestMode is allowed only for UAT or Production approval validation.'
     }
     $tempRoot = Get-NormalizedFullPath ([System.IO.Path]::GetTempPath())
     $candidate = Get-NormalizedFullPath $DestinationRoot
     if (-not $candidate.StartsWith($tempRoot + '\', [System.StringComparison]::OrdinalIgnoreCase)) {
         throw 'LocalTestMode destination must be below the system temporary directory.'
     }
+} elseif ($ProductionApprovalValidationOnly) {
+    throw 'ProductionApprovalValidationOnly is available only in LocalTestMode.'
 } elseif ($DestinationRoot.TrimEnd('\') -cne $expectedDestination.TrimEnd('\')) {
     throw "Deployment destination must be exactly $expectedDestination"
 }
@@ -90,11 +108,13 @@ $destination = (Resolve-Path -LiteralPath $DestinationRoot).ProviderPath.TrimEnd
 if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
     throw "Release manifest not found: $ManifestPath"
 }
-$manifestHash = (Get-FileHash -LiteralPath $ManifestPath -Algorithm SHA256).Hash
-$manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
+$manifestSnapshot = Read-D365StrictJsonSnapshot $ManifestPath 'Release manifest'
+$manifestHash = $manifestSnapshot.Hash
+$manifest = $manifestSnapshot.Value
 if ($manifest.release_id -cne $ReleaseId) {
     throw 'Release ID does not match the release manifest.'
 }
+$manifestProjects = Get-D365ManifestProjects $manifest
 $manifestProject = $manifest.projects.$ProjectName
 if ($null -eq $manifestProject -or $manifestProject.git_sha -notmatch '^[0-9a-f]{40}$') {
     throw "Release manifest does not contain a valid Git SHA for $ProjectName."
@@ -109,32 +129,50 @@ if ($LASTEXITCODE -ne 0 -or $dirty -ne '') {
 }
 
 if ($Environment -eq 'Production') {
+    if ([string]::IsNullOrWhiteSpace($ExpectedUatApprovalSha256)) { throw 'Production deployment requires the exact expected UAT approval receipt SHA-256.' }
     if (-not (Test-Path -LiteralPath $UatApprovalPath -PathType Leaf)) {
         throw 'Production deployment requires a UAT approval receipt.'
     }
-    $approval = Get-Content -LiteralPath $UatApprovalPath -Raw | ConvertFrom-Json
+    $approvalRootFull=Get-D365FullPath $ApprovalAuditRoot
+    if($LocalTestMode){$temp=Get-D365FullPath([IO.Path]::GetTempPath());if(-not$approvalRootFull.StartsWith($temp+'\',[StringComparison]::OrdinalIgnoreCase)){throw 'LocalTestMode approval audit root must be under system temp.'};$allowedWriters=@([Security.Principal.WindowsIdentity]::GetCurrent().User.Value,'S-1-5-18','S-1-5-32-544')}
+    else{if($null-eq(Get-D365ApprovalRootKind $approvalRootFull)){throw 'Approval audit root is not an approved canonical local or UNC root.'};$allowedWriters=@('S-1-5-18','S-1-5-32-544')}
+    Assert-D365NoReparse $approvalRootFull;Assert-D365ProtectedAcl $approvalRootFull $allowedWriters -RequireProtected
+    $approvalFull=Assert-D365DirectChild $UatApprovalPath $approvalRootFull;Assert-D365NoReparse $approvalFull
+    $expectedApprovalLeaf="uat-approval-{0}-{1}.json" -f $ReleaseId,$manifestHash
+    if((Split-Path -Leaf $approvalFull)-cne$expectedApprovalLeaf){throw 'UAT approval receipt is not at the canonical immutable audit path.'}
+    Assert-D365ProtectedAcl $approvalFull $allowedWriters
+    $approvalSnapshot=Read-D365StrictJsonSnapshot $approvalFull 'UAT approval receipt'
+    if($approvalSnapshot.Hash-cne$ExpectedUatApprovalSha256.ToLowerInvariant()){throw 'UAT approval receipt SHA-256 does not match the exact expected hash.'}
+    $approval = $approvalSnapshot.Value
     if (($approval.status -cne 'APPROVED') -or ($approval.release_id -cne $ReleaseId) -or ($approval.manifest_sha256 -cne $manifestHash)) {
         throw 'UAT approval receipt does not match this immutable release manifest.'
     }
+    if([string]$approval.approved_by_sid-notmatch'^S-1-(?:[0-9]+-)+[0-9]+$'){throw 'UAT approval receipt does not contain a valid approver SID.'}
+    $approvalProjectNames=@($approval.projects.PSObject.Properties.Name|Sort-Object);$manifestProjectNames=@($manifestProjects.Keys|Sort-Object)
+    if(($approvalProjectNames-join"`n")-cne($manifestProjectNames-join"`n")){throw 'UAT approval receipt project set does not match the release manifest.'}
+    foreach($project in $manifestProjectNames){if([string]$approval.projects.$project.git_sha-cne[string]$manifest.projects.$project.git_sha){throw "UAT approval receipt Git SHA does not match project $project."}}
+    if($ProductionApprovalValidationOnly){Write-Output '{"status":"VALID"}';return}
 }
 
+$attemptId = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), ([guid]::NewGuid().ToString('N'))
+$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) "d365-deploy-stage-$attemptId"
+New-Item -ItemType Directory -Path $stageRoot -Force | Out-Null
+try {
 $sourceFiles = @{}
-$trackedPaths = @(& git -c core.quotepath=false -C $source ls-files)
-if ($LASTEXITCODE -ne 0) {
-    throw 'Unable to list tracked release files.'
+$treeBytes=Invoke-GitBytes $source ("-c core.quotepath=false ls-tree -r -z {0}" -f $head)
+$treeText=[Text.UTF8Encoding]::new($false,$true).GetString($treeBytes)
+foreach($treeEntry in @($treeText.Split([char[]]@([char]0),[StringSplitOptions]::RemoveEmptyEntries))){
+    if($treeEntry-notmatch'^\d+\s+blob\s+(?<sha>[0-9a-f]{40})\t(?<path>.+)$'){throw 'Unable to parse attested Git tree entry.'}
+    $relative=$matches.path.Replace('/','\')
+    if(-not(Test-ExcludedPath $relative $effectiveExclude)){$stagePath=Join-Path $stageRoot $relative;Export-GitBlob $source $matches.sha $stagePath;$sourceFiles[$relative.ToLowerInvariant()]=[pscustomobject]@{FullName=$stagePath;RelativePath=$relative}}
 }
-foreach ($trackedPath in $trackedPaths) {
-    $relative = $trackedPath.Replace('/', '\')
-    $file = Get-Item -LiteralPath (Join-Path $source $relative)
-    if (-not (Test-ExcludedPath $relative $effectiveExclude)) {
-        $sourceFiles[$relative.ToLowerInvariant()] = $file
-    }
-}
+if($LocalTestMode-and-not[string]::IsNullOrWhiteSpace($env:D365_SYNC_TEST_MUTATE_SOURCE_AFTER_ATTESTATION)){[IO.File]::AppendAllText((Join-Path $source $env:D365_SYNC_TEST_MUTATE_SOURCE_AFTER_ATTESTATION),'# post-attestation mutation',[Text.UTF8Encoding]::new($false))}
+if($LocalTestMode-and$env:D365_SYNC_TEST_MUTATE_MANIFEST_AFTER_ATTESTATION-ceq'1'){[IO.File]::AppendAllText($ManifestPath,"`n",[Text.UTF8Encoding]::new($false))}
 
 $changes = [Collections.Generic.List[object]]::new()
 foreach ($entry in $sourceFiles.GetEnumerator()) {
     $sourceFile = $entry.Value
-    $relative = $sourceFile.FullName.Substring($source.Length).TrimStart('\', '/')
+    $relative = $sourceFile.RelativePath
     $target = Join-Path $destination $relative
     if (-not (Test-Path -LiteralPath $target -PathType Leaf)) {
         $changes.Add([pscustomobject]@{ Type='New'; RelativePath=$relative; SourcePath=$sourceFile.FullName; DestinationPath=$target })
@@ -166,22 +204,15 @@ if ($ApprovalToken -cne $expectedToken) {
     throw 'Deployment approval token did not match.'
 }
 
-$attemptId = '{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), ([guid]::NewGuid().ToString('N'))
+$currentManifestHash=Get-D365Sha256([IO.File]::ReadAllBytes($ManifestPath))
+if($currentManifestHash-cne$manifestHash){throw 'Release manifest changed after attestation.'}
+Assert-AttestedRepositoryState $source $head
 $backupRoot = Join-Path (Split-Path -Parent $destination) ".deploy-backups\$ProjectName\$ReleaseId\$attemptId"
-$stageRoot = Join-Path ([System.IO.Path]::GetTempPath()) "d365-deploy-stage-$attemptId"
 $createdPaths = [Collections.Generic.List[string]]::new()
 $metadataPath = Join-Path $destination '.deployment\current-release.json'
 
 try {
-    New-Item -ItemType Directory -Path $stageRoot, $backupRoot -Force | Out-Null
-    foreach ($change in $changes | Where-Object Type -ne 'Deleted') {
-        $stagePath = Join-Path $stageRoot $change.RelativePath
-        New-Item -ItemType Directory -Path (Split-Path -Parent $stagePath) -Force | Out-Null
-        Copy-Item -LiteralPath $change.SourcePath -Destination $stagePath
-        if ((Get-FileHash $change.SourcePath -Algorithm SHA256).Hash -cne (Get-FileHash $stagePath -Algorithm SHA256).Hash) {
-            throw "Staging checksum failed: $($change.RelativePath)"
-        }
-    }
+    New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 
     foreach ($change in $changes) {
         if (Test-Path -LiteralPath $change.DestinationPath -PathType Leaf) {
@@ -230,8 +261,9 @@ try {
         Copy-Item -LiteralPath $backupFile.FullName -Destination $target -Force
     }
     throw
-} finally {
-    if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
 }
 
 Write-Output ('Deployed release {0} to {1}.' -f $ReleaseId, $destination)
+} finally {
+    if (Test-Path -LiteralPath $stageRoot) { Remove-Item -LiteralPath $stageRoot -Recurse -Force }
+}
