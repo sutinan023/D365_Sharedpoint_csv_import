@@ -36,6 +36,17 @@ function Test-CanonicalPathEqual {
     return [string]::Equals((Get-CanonicalPath $Left), (Get-CanonicalPath $Right), [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Get-ApprovedRootPairKind {
+    param([string] $EnvironmentRoot, [string] $AuditRoot, [string] $Segment)
+    $localEnvironmentRoot = "C:\xampp\htdocs\$Segment"
+    $localAuditRoot = 'C:\xampp\backups\d365'
+    $uncEnvironmentRoot = '\\100.1.1.166\c$\xampp\htdocs\' + $Segment
+    $uncAuditRoot = '\\100.1.1.166\c$\xampp\backups\d365'
+    if ((Test-CanonicalPathEqual $EnvironmentRoot $localEnvironmentRoot) -and (Test-CanonicalPathEqual $AuditRoot $localAuditRoot)) { return 'LOCAL' }
+    if ((Test-CanonicalPathEqual $EnvironmentRoot $uncEnvironmentRoot) -and (Test-CanonicalPathEqual $AuditRoot $uncAuditRoot)) { return 'UNC' }
+    return $null
+}
+
 function Assert-NoReparseComponent {
     param([string] $Path)
     $cursor = Get-CanonicalPath $Path
@@ -135,19 +146,23 @@ $segment = if ($Environment -eq 'UAT') { 'uat' } else { 'prod' }
 $expectedEnvironment = if ($Environment -eq 'UAT') { 'UAT' } else { 'PRODUCTION' }
 $expectedDatabase = if ($Environment -eq 'UAT') { 'D365_finance' } else { 'D365_finance_prod' }
 $canonicalEnvironmentRoot = "C:\xampp\htdocs\$segment"
-$canonicalAuditRoot = 'C:\xampp\backups\d365'
 if ([string]::IsNullOrWhiteSpace($EnvironmentRoot)) { $EnvironmentRoot = $canonicalEnvironmentRoot }
 $environmentRootFull = Get-CanonicalPath $EnvironmentRoot
 $auditRootFull = Get-CanonicalPath $AuditRoot
+$approvedRootKind = Get-ApprovedRootPairKind $environmentRootFull $auditRootFull $segment
+$policyTestOnly = $LocalTestMode -and $env:D365_APP_RELEASE_POLICY_TEST_ONLY -ceq '1'
+if ($env:D365_APP_RELEASE_POLICY_TEST_ONLY -ceq '1' -and -not $LocalTestMode) { throw 'Root-pair policy test mode requires LocalTestMode.' }
+if ($policyTestOnly) {
+    [pscustomobject]@{ accepted = $null -ne $approvedRootKind; kind = $approvedRootKind } | ConvertTo-Json -Compress
+    return
+}
 
 if ($LocalTestMode) {
     if ((-not (Test-UnderSystemTemp $environmentRootFull)) -or (-not (Test-UnderSystemTemp $auditRootFull))) {
         throw 'LocalTestMode requires EnvironmentRoot and AuditRoot under the system temporary directory.'
     }
 } else {
-    if ((-not (Test-CanonicalPathEqual $environmentRootFull $canonicalEnvironmentRoot)) -or (-not (Test-CanonicalPathEqual $auditRootFull $canonicalAuditRoot))) {
-        throw 'Normal mode requires the canonical environment and audit roots.'
-    }
+    if ($null -eq $approvedRootKind) { throw 'Normal mode requires one approved canonical local or UNC root pair.' }
 }
 Assert-NoReparseComponent $environmentRootFull
 Assert-NoReparseComponent $auditRootFull

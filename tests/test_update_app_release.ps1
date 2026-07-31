@@ -50,9 +50,30 @@ function Assert-SnapshotsUnchanged {
     }
 }
 
+function Assert-RootPairPolicy {
+    param([string] $Environment, [string] $EnvironmentRoot, [string] $AuditRoot, [bool] $Expected, [string] $ExpectedKind = '')
+    $previousPolicyMode = $env:D365_APP_RELEASE_POLICY_TEST_ONLY
+    try {
+        $env:D365_APP_RELEASE_POLICY_TEST_ONLY = '1'
+        $policy = (& $scriptPath -Environment $Environment -ReleaseId 'policy-check' -EnvironmentRoot $EnvironmentRoot -AuditRoot $AuditRoot -LocalTestMode -ApprovalToken 'unused' | Out-String | ConvertFrom-Json)
+    } finally { $env:D365_APP_RELEASE_POLICY_TEST_ONLY = $previousPolicyMode }
+    if ([bool]$policy.accepted -ne $Expected) { throw "Unexpected root-pair policy for $EnvironmentRoot and $AuditRoot" }
+    if ($Expected -and $policy.kind -cne $ExpectedKind) { throw "Expected root-pair kind $ExpectedKind, got $($policy.kind)" }
+}
+
 New-Item -ItemType Directory -Path $testRoot | Out-Null
 New-Item -ItemType Directory -Path $auditRoot | Out-Null
 try {
+    Assert-RootPairPolicy UAT 'C:\xampp\htdocs\uat' 'C:\xampp\backups\d365' $true LOCAL
+    Assert-RootPairPolicy UAT '\\100.1.1.166\c$\xampp\htdocs\uat' '\\100.1.1.166\c$\xampp\backups\d365' $true UNC
+    Assert-RootPairPolicy Production '\\100.1.1.166\C$\XAMPP\HTDOCS\PROD' '\\100.1.1.166\C$\XAMPP\BACKUPS\D365' $true UNC
+    Assert-RootPairPolicy UAT '\\100.1.1.167\c$\xampp\htdocs\uat' '\\100.1.1.167\c$\xampp\backups\d365' $false
+    Assert-RootPairPolicy UAT '\\100.1.1.166\d$\xampp\htdocs\uat' '\\100.1.1.166\d$\xampp\backups\d365' $false
+    Assert-RootPairPolicy UAT '\\100.1.1.166\c$\xampp\htdocs\uat' '\\100.1.1.166\c$\xampp\backups\d365-other' $false
+    Assert-RootPairPolicy UAT 'C:\xampp\htdocs\uat' '\\100.1.1.166\c$\xampp\backups\d365' $false
+    Assert-RootPairPolicy UAT '\\100.1.1.166\c$\xampp\htdocs\uat' 'C:\xampp\backups\d365' $false
+    Assert-RootPairPolicy UAT '\\100.1.1.166\c$\xampp\htdocs\prod' '\\100.1.1.166\c$\xampp\backups\d365' $false
+
     $uatRoot = New-TestEnvironment
     $beforePath = Join-Path $uatRoot 'D365_Sharedpoint_csv_import\config\.env'
     $before = [IO.File]::ReadAllBytes($beforePath)
@@ -100,6 +121,7 @@ try {
     $scriptSource = Get-Content -LiteralPath $scriptPath -Raw
     if ($scriptSource -notmatch 'FileMode\]::CreateNew') { throw 'Audit is not opened with CreateNew.' }
     if ($scriptSource -notmatch 'function Test-CanonicalPathEqual') { throw 'Canonical path comparison is not explicitly case insensitive.' }
+    if ($scriptSource -notmatch 'Test-Path -LiteralPath \$environmentRootFull -PathType Container' -or $scriptSource -notmatch 'Test-Path -LiteralPath \$auditRootFull -PathType Container') { throw 'Normal execution no longer requires both roots to exist.' }
 
     foreach ($fault in @('AfterFirstWrite', 'AfterVerification', 'DuringAudit')) {
         $faultRoot = New-TestEnvironment -Name ("fault-{0}" -f $fault.ToLowerInvariant())
