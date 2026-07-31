@@ -24,7 +24,28 @@ function Invoke-ExpectedFailure {
     }
 }
 
+function Get-EnvironmentSnapshots {
+    param([string] $Root)
+    $snapshots = @{}
+    foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
+        $path = Join-Path $Root "$project\config\.env"
+        $snapshots[$path] = [IO.File]::ReadAllBytes($path)
+    }
+    return $snapshots
+}
+
+function Assert-SnapshotsUnchanged {
+    param([hashtable] $Snapshots)
+    foreach ($path in $Snapshots.Keys) {
+        $actual = [IO.File]::ReadAllBytes($path)
+        if ([Convert]::ToBase64String($actual) -cne [Convert]::ToBase64String($Snapshots[$path])) {
+            throw "Rollback did not restore original bytes: $path"
+        }
+    }
+}
+
 New-Item -ItemType Directory -Path $testRoot | Out-Null
+New-Item -ItemType Directory -Path $auditRoot | Out-Null
 try {
     $uatRoot = New-TestEnvironment
     $beforePath = Join-Path $uatRoot 'D365_Sharedpoint_csv_import\config\.env'
@@ -42,6 +63,35 @@ try {
 
     $second = (& $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $uatRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' | Out-String | ConvertFrom-Json)
     if ($second.status -cne 'NO_CHANGE') { throw 'Idempotent rerun did not report NO_CHANGE.' }
+
+    $secondUpdateRoot = New-TestEnvironment -Name second-success
+    $secondUpdate = (& $scriptPath -Environment UAT -ReleaseId '2026-07-31.10' -EnvironmentRoot $secondUpdateRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.10' | Out-String | ConvertFrom-Json)
+    if ($secondUpdate.audit_file -ceq $result.audit_file) { throw 'Audit filenames collided.' }
+    if ((Split-Path $secondUpdate.audit_file -Leaf) -notmatch '^app-release-update-uat-\d{8}-\d{9}-[0-9a-f]{32}\.json$') { throw 'Audit filename is not collision resistant.' }
+    $scriptSource = Get-Content -LiteralPath $scriptPath -Raw
+    if ($scriptSource -notmatch 'FileMode\]::CreateNew') { throw 'Audit is not opened with CreateNew.' }
+    if ($scriptSource -notmatch 'function Test-CanonicalPathEqual') { throw 'Canonical path comparison is not explicitly case insensitive.' }
+
+    foreach ($fault in @('AfterFirstWrite', 'AfterVerification', 'DuringAudit')) {
+        $faultRoot = New-TestEnvironment -Name ("fault-{0}" -f $fault.ToLowerInvariant())
+        $snapshots = Get-EnvironmentSnapshots $faultRoot
+        $previousFault = $env:D365_APP_RELEASE_TEST_FAULT
+        try {
+            $env:D365_APP_RELEASE_TEST_FAULT = $fault
+            Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $faultRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'simulated'
+        } finally { $env:D365_APP_RELEASE_TEST_FAULT = $previousFault }
+        Assert-SnapshotsUnchanged $snapshots
+    }
+
+    foreach ($suffix in @('trailing text', '# forbidden comment')) {
+        $malformedRoot = New-TestEnvironment -Name ('malformed-' + [guid]::NewGuid())
+        $malformedPath = Join-Path $malformedRoot 'D365_Sharedpoint_csv_import\config\.env'
+        $malformed = (Get-Content -LiteralPath $malformedPath -Raw) -replace 'APP_RELEASE=2026-07-31.8', "APP_RELEASE=2026-07-31.8 $suffix"
+        [IO.File]::WriteAllText($malformedPath, $malformed, [Text.UTF8Encoding]::new($false))
+        $snapshots = Get-EnvironmentSnapshots $malformedRoot
+        Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $malformedRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'APP_RELEASE.*safe'
+        Assert-SnapshotsUnchanged $snapshots
+    }
 
     $wrongTokenRoot = New-TestEnvironment -Name wrong-token
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $wrongTokenRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'wrong' } 'approval'
@@ -62,6 +112,41 @@ try {
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $missingRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'not found'
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '../unsafe' -EnvironmentRoot $uatRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE ../unsafe' } 'ReleaseId'
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot 'C:\xampp\htdocs\uat' -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'LocalTestMode'
+
+    $normalCustomRoot = New-TestEnvironment -Name normal-custom
+    $normalSnapshots = Get-EnvironmentSnapshots $normalCustomRoot
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $normalCustomRoot -AuditRoot 'C:\xampp\backups\d365' -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'canonical'
+    Assert-SnapshotsUnchanged $normalSnapshots
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot 'C:\xampp\htdocs\uat' -AuditRoot $auditRoot -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'canonical'
+
+    $junctionTarget = New-TestEnvironment -Name junction-target
+    $junctionRoot = Join-Path $testRoot 'junction-root'
+    New-Item -ItemType Junction -Path $junctionRoot -Target $junctionTarget | Out-Null
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $junctionRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'reparse'
+    [IO.Directory]::Delete($junctionRoot)
+
+    $envPathRoot = New-TestEnvironment -Name env-path-junction
+    $linkedProject = Join-Path $envPathRoot 'finance_report'
+    $linkedTarget = Join-Path $testRoot 'env-path-junction-target'
+    [IO.Directory]::Move($linkedProject, $linkedTarget)
+    New-Item -ItemType Junction -Path $linkedProject -Target $linkedTarget | Out-Null
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $envPathRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'reparse'
+    [IO.Directory]::Delete($linkedProject)
+
+    $auditTarget = Join-Path $testRoot 'audit-target'
+    New-Item -ItemType Directory -Path $auditTarget | Out-Null
+    $auditJunction = Join-Path $testRoot 'audit-junction'
+    New-Item -ItemType Junction -Path $auditJunction -Target $auditTarget | Out-Null
+    $auditJunctionRoot = New-TestEnvironment -Name audit-junction-env
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $auditJunctionRoot -AuditRoot $auditJunction -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'reparse'
+    [IO.Directory]::Delete($auditJunction)
+
+    $lockRoot = New-TestEnvironment -Name locked
+    $lockPath = Join-Path $auditRoot 'app-release-update-uat.lock'
+    $heldLock = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    try {
+        Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $lockRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'already running|lock'
+    } finally { $heldLock.Dispose() }
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }

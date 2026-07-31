@@ -15,12 +15,48 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$safeReleasePattern = '[A-Za-z0-9][A-Za-z0-9._-]{0,127}'
+$effectiveTestFault = if ($LocalTestMode -and -not [string]::IsNullOrWhiteSpace($env:D365_APP_RELEASE_TEST_FAULT)) { $env:D365_APP_RELEASE_TEST_FAULT } else { 'None' }
+if ($effectiveTestFault -notin @('None', 'AfterFirstWrite', 'AfterVerification', 'DuringAudit')) { throw 'Unknown TestFault value.' }
+
+function Get-CanonicalPath {
+    param([string] $Path)
+    return [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+}
 
 function Test-UnderSystemTemp {
     param([string] $Path)
-    $temp = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\', '/')
-    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\', '/')
+    $temp = (Get-CanonicalPath ([IO.Path]::GetTempPath()))
+    $full = Get-CanonicalPath $Path
     return $full.StartsWith($temp + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Test-CanonicalPathEqual {
+    param([string] $Left, [string] $Right)
+    return [string]::Equals((Get-CanonicalPath $Left), (Get-CanonicalPath $Right), [StringComparison]::OrdinalIgnoreCase)
+}
+
+function Assert-NoReparseComponent {
+    param([string] $Path)
+    $cursor = Get-CanonicalPath $Path
+    while (-not [string]::IsNullOrWhiteSpace($cursor)) {
+        if (Test-Path -LiteralPath $cursor) {
+            $item = Get-Item -LiteralPath $cursor -Force
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw 'Path safety check rejected a reparse point or junction.'
+            }
+        }
+        $parent = [IO.Path]::GetDirectoryName($cursor)
+        if ([string]::IsNullOrWhiteSpace($parent) -or $parent -ceq $cursor) { break }
+        $cursor = $parent
+    }
+}
+
+function Get-Sha256 {
+    param([byte[]] $Bytes)
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try { return ([BitConverter]::ToString($sha.ComputeHash($Bytes))).Replace('-', '').ToLowerInvariant() }
+    finally { $sha.Dispose() }
 }
 
 function Get-FileTextState {
@@ -30,7 +66,7 @@ function Get-FileTextState {
     $preamble = [byte[]]@()
     $offset = 0
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
-        $encoding = [Text.UTF8Encoding]::new($false); $preamble = $bytes[0..2]; $offset = 3
+        $preamble = $bytes[0..2]; $offset = 3
     } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
         $encoding = [Text.UnicodeEncoding]::new($false, $false); $preamble = $bytes[0..1]; $offset = 2
     } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
@@ -42,23 +78,30 @@ function Get-FileTextState {
 
 function Get-ConfigRecord {
     param([string] $Path, [string] $ExpectedEnvironment, [string] $ExpectedDatabase)
+    Assert-NoReparseComponent $Path
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Environment file not found: $Path" }
-    $state = Get-FileTextState -Path $Path
+    $state = Get-FileTextState $Path
     $values = @{}
     foreach ($key in @('APP_ENV', 'APP_RELEASE', 'DB_NAME')) {
         $matches = [regex]::Matches($state.Text, "(?m)^\s*$key\s*=.*$")
         if ($matches.Count -ne 1) { throw "$key must appear exactly one time in every environment file." }
-        $raw = $matches[0].Value -replace "^\s*$key\s*=\s*", ''
-        $values[$key] = ($raw -replace '\s*(?:#.*)?$', '').Trim().Trim('"').Trim("'")
+        if ($key -eq 'APP_RELEASE') {
+            $safeMatch = [regex]::Match($matches[0].Value, "^\s*APP_RELEASE\s*=\s*(?<value>$safeReleasePattern)\s*$")
+            if (-not $safeMatch.Success) { throw 'APP_RELEASE must contain exactly one safe release ID with no trailing text or comment.' }
+            $values[$key] = $safeMatch.Groups['value'].Value
+        } else {
+            $raw = $matches[0].Value -replace "^\s*$key\s*=\s*", ''
+            $values[$key] = ($raw -replace '\s*(?:#.*)?$', '').Trim().Trim('"').Trim("'")
+        }
     }
     if ($values.APP_ENV.ToUpperInvariant() -cne $ExpectedEnvironment) { throw 'APP_ENV does not match the requested environment.' }
     if ($values.DB_NAME -cne $ExpectedDatabase) { throw 'DB_NAME does not match the requested environment.' }
-    [pscustomobject]@{ Path = [IO.Path]::GetFullPath($Path); State = $state; Release = $values.APP_RELEASE }
+    [pscustomobject]@{ Path = Get-CanonicalPath $Path; State = $state; Release = $values.APP_RELEASE }
 }
 
 function Get-ReplacementBytes {
     param($Record, [string] $NewRelease)
-    $linePattern = '(?m)^(\s*APP_RELEASE\s*=\s*)\S*(\s*(?:#.*)?)$'
+    $linePattern = "(?m)^(\s*APP_RELEASE\s*=\s*)$safeReleasePattern(\s*)$"
     $updatedText = [regex]::Replace($Record.State.Text, $linePattern, ('${1}' + $NewRelease + '${2}'), 1)
     if ($updatedText -ceq $Record.State.Text) { throw 'APP_RELEASE line could not be updated safely.' }
     $body = $Record.State.Encoding.GetBytes($updatedText)
@@ -72,50 +115,97 @@ function Get-ReplacementBytes {
 $segment = if ($Environment -eq 'UAT') { 'uat' } else { 'prod' }
 $expectedEnvironment = if ($Environment -eq 'UAT') { 'UAT' } else { 'PRODUCTION' }
 $expectedDatabase = if ($Environment -eq 'UAT') { 'D365_finance' } else { 'D365_finance_prod' }
-if ([string]::IsNullOrWhiteSpace($EnvironmentRoot)) { $EnvironmentRoot = "C:\xampp\htdocs\$segment" }
-$environmentRootFull = [IO.Path]::GetFullPath($EnvironmentRoot)
-$auditRootFull = [IO.Path]::GetFullPath($AuditRoot)
-if ($LocalTestMode -and ((-not (Test-UnderSystemTemp $environmentRootFull)) -or (-not (Test-UnderSystemTemp $auditRootFull)))) {
-    throw 'LocalTestMode requires EnvironmentRoot and AuditRoot under the system temporary directory.'
+$canonicalEnvironmentRoot = "C:\xampp\htdocs\$segment"
+$canonicalAuditRoot = 'C:\xampp\backups\d365'
+if ([string]::IsNullOrWhiteSpace($EnvironmentRoot)) { $EnvironmentRoot = $canonicalEnvironmentRoot }
+$environmentRootFull = Get-CanonicalPath $EnvironmentRoot
+$auditRootFull = Get-CanonicalPath $AuditRoot
+
+if ($LocalTestMode) {
+    if ((-not (Test-UnderSystemTemp $environmentRootFull)) -or (-not (Test-UnderSystemTemp $auditRootFull))) {
+        throw 'LocalTestMode requires EnvironmentRoot and AuditRoot under the system temporary directory.'
+    }
+} else {
+    if ((-not (Test-CanonicalPathEqual $environmentRootFull $canonicalEnvironmentRoot)) -or (-not (Test-CanonicalPathEqual $auditRootFull $canonicalAuditRoot))) {
+        throw 'Normal mode requires the canonical environment and audit roots.'
+    }
 }
+Assert-NoReparseComponent $environmentRootFull
+Assert-NoReparseComponent $auditRootFull
+if (-not (Test-Path -LiteralPath $environmentRootFull -PathType Container)) { throw 'Environment root not found.' }
+if (-not (Test-Path -LiteralPath $auditRootFull -PathType Container)) { throw 'Audit root not found.' }
+
 $expectedApproval = "UPDATE $expectedEnvironment APP_RELEASE $ReleaseId"
 if ([string]::IsNullOrWhiteSpace($ApprovalToken)) { $ApprovalToken = Read-Host "Type $expectedApproval to update APP_RELEASE" }
 if ($ApprovalToken -cne $expectedApproval) { throw 'APP_RELEASE update approval token did not match.' }
 
-$records = @()
-foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
-    $records += Get-ConfigRecord -Path (Join-Path $environmentRootFull "$project\config\.env") -ExpectedEnvironment $expectedEnvironment -ExpectedDatabase $expectedDatabase
-}
-$oldReleases = @($records | ForEach-Object Release | Select-Object -Unique)
-if ($oldReleases.Count -ne 1) { throw 'Current APP_RELEASE values must be identical across all projects.' }
-$oldRelease = $oldReleases[0]
-if ($oldRelease -ceq $ReleaseId) {
-    [pscustomobject]@{ status = 'NO_CHANGE'; environment = $Environment; release_id = $ReleaseId; old_release = $oldRelease; audit_file = $null } | ConvertTo-Json -Compress
-    return
-}
-
-$updates = @($records | ForEach-Object {
-    [pscustomobject]@{ Record = $_; NewBytes = Get-ReplacementBytes -Record $_ -NewRelease $ReleaseId; BeforeHash = ([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create().ComputeHash($_.State.Bytes))).Replace('-', '').ToLowerInvariant()) }
-})
-$timestamp = Get-Date
-$auditFile = Join-Path $auditRootFull ("app-release-update-{0}-{1}.json" -f $segment, $timestamp.ToString('yyyyMMdd-HHmmssfff'))
-$written = @()
+$lockPath = Join-Path $auditRootFull "app-release-update-$segment.lock"
+$lockStream = $null
 try {
-    New-Item -ItemType Directory -Path $auditRootFull -Force | Out-Null
-    foreach ($update in $updates) {
-        [IO.File]::WriteAllBytes($update.Record.Path, $update.NewBytes)
-        $afterHash = (Get-FileHash -LiteralPath $update.Record.Path -Algorithm SHA256).Hash.ToLowerInvariant()
-        $expectedHash = ([BitConverter]::ToString(([Security.Cryptography.SHA256]::Create().ComputeHash($update.NewBytes))).Replace('-', '').ToLowerInvariant())
-        if ($afterHash -cne $expectedHash) { throw 'APP_RELEASE write verification failed.' }
-        $update | Add-Member -NotePropertyName AfterHash -NotePropertyValue $afterHash
-        $written += $update
+    try {
+        $lockStream = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+    } catch {
+        throw 'Another APP_RELEASE updater is already running or the exclusive lock cannot be acquired.'
     }
-    $audit = [ordered]@{ status = 'UPDATED'; environment = $Environment; release_id = $ReleaseId; updated_at = $timestamp.ToString('o'); operator = $env:USERNAME; old_release = $oldRelease; files = @($updates | ForEach-Object { [ordered]@{ path = $_.Record.Path; old_release = $_.Record.Release; new_release = $ReleaseId; sha256_before = $_.BeforeHash; sha256_after = $_.AfterHash } }) }
-    [IO.File]::WriteAllText($auditFile, ($audit | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
-    [pscustomobject]@{ status = 'UPDATED'; environment = $Environment; release_id = $ReleaseId; old_release = $oldRelease; audit_file = $auditFile } | ConvertTo-Json -Compress
+
+    $records = @()
+    foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
+        $records += Get-ConfigRecord -Path (Join-Path $environmentRootFull "$project\config\.env") -ExpectedEnvironment $expectedEnvironment -ExpectedDatabase $expectedDatabase
+    }
+    $oldReleases = @($records | ForEach-Object Release | Select-Object -Unique)
+    if ($oldReleases.Count -ne 1) { throw 'Current APP_RELEASE values must be identical across all projects.' }
+    $oldRelease = $oldReleases[0]
+    if ($oldRelease -ceq $ReleaseId) {
+        [pscustomobject]@{ status = 'NO_CHANGE'; environment = $Environment; release_id = $ReleaseId; old_release = $oldRelease; audit_file = $null } | ConvertTo-Json -Compress
+        return
+    }
+
+    $updates = @($records | ForEach-Object {
+        [pscustomobject]@{ Record = $_; NewBytes = Get-ReplacementBytes $_ $ReleaseId; BeforeHash = Get-Sha256 $_.State.Bytes; AfterHash = $null }
+    })
+    $auditFile = Join-Path $auditRootFull ("app-release-update-{0}-{1}-{2}.json" -f $segment, (Get-Date -Format 'yyyyMMdd-HHmmssfff'), ([guid]::NewGuid().ToString('N')))
+    $mutationStarted = $false
+    try {
+        for ($index = 0; $index -lt $updates.Count; $index++) {
+            $mutationStarted = $true
+            [IO.File]::WriteAllBytes($updates[$index].Record.Path, $updates[$index].NewBytes)
+            if ($effectiveTestFault -ceq 'AfterFirstWrite' -and $index -eq 0) { throw 'Simulated failure after first write.' }
+            $actualHash = (Get-FileHash -LiteralPath $updates[$index].Record.Path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $expectedHash = Get-Sha256 $updates[$index].NewBytes
+            if ($actualHash -cne $expectedHash) { throw 'APP_RELEASE write verification failed.' }
+            $updates[$index].AfterHash = $actualHash
+        }
+        if ($effectiveTestFault -ceq 'AfterVerification') { throw 'Simulated failure after write verification.' }
+
+        $audit = [ordered]@{ status = 'UPDATED'; environment = $Environment; release_id = $ReleaseId; updated_at = (Get-Date).ToString('o'); operator = $env:USERNAME; old_release = $oldRelease; files = @($updates | ForEach-Object { [ordered]@{ path = $_.Record.Path; old_release = $_.Record.Release; new_release = $ReleaseId; sha256_before = $_.BeforeHash; sha256_after = $_.AfterHash } }) }
+        $auditBytes = [Text.UTF8Encoding]::new($false).GetBytes(($audit | ConvertTo-Json -Depth 5))
+        $auditStream = [IO.File]::Open($auditFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            if ($effectiveTestFault -ceq 'DuringAudit') {
+                $auditStream.Write($auditBytes, 0, [Math]::Min(16, $auditBytes.Length))
+                throw 'Simulated failure during audit write.'
+            }
+            $auditStream.Write($auditBytes, 0, $auditBytes.Length)
+            $auditStream.Flush($true)
+        } finally { $auditStream.Dispose() }
+
+        [pscustomobject]@{ status = 'UPDATED'; environment = $Environment; release_id = $ReleaseId; old_release = $oldRelease; audit_file = $auditFile } | ConvertTo-Json -Compress
+    } catch {
+        $failure = $_
+        if ($mutationStarted) {
+            $rollbackErrors = @()
+            foreach ($update in $updates) {
+                try { [IO.File]::WriteAllBytes($update.Record.Path, $update.Record.State.Bytes) }
+                catch { $rollbackErrors += $update.Record.Path }
+            }
+            if (Test-Path -LiteralPath $auditFile -PathType Leaf) {
+                try { Remove-Item -LiteralPath $auditFile -Force } catch { $rollbackErrors += $auditFile }
+            }
+            if ($rollbackErrors.Count -gt 0) { throw 'APP_RELEASE update failed and rollback could not restore every target.' }
+        }
+        throw $failure
+    }
 }
-catch {
-    foreach ($update in $written) { [IO.File]::WriteAllBytes($update.Record.Path, $update.Record.State.Bytes) }
-    if (Test-Path -LiteralPath $auditFile -PathType Leaf) { Remove-Item -LiteralPath $auditFile -Force }
-    throw
+finally {
+    if ($null -ne $lockStream) { $lockStream.Dispose() }
 }
