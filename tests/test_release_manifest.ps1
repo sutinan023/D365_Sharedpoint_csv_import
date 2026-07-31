@@ -23,6 +23,19 @@ try {
         }
     }
 
+    $expectedMigrations = @(
+        '000_create_schema_migrations.sql',
+        '001_create_sharepoint_file_queue.sql',
+        '002_add_pending_archive_to_import_files_status.sql',
+        '003_add_effective_date_to_stg_received_outbound.sql',
+        '004_create_vw_import_report.sql',
+        '005_create_v_tbpayin_from_payment_outbound.sql'
+    )
+    $actualMigrations = @($manifest.migrations.D365_Sharedpoint_csv_import)
+    if ((Compare-Object $expectedMigrations $actualMigrations -SyncWindow 0).Count -ne 0) {
+        throw 'Release manifest does not contain the complete ordered migration set'
+    }
+
     $manifestPath = Join-Path $testRoot 'immutable.json'
     & $scriptPath -ReleaseId 'immutable' -SourceParent $testRoot -OutputPath $manifestPath | Out-Null
     try {

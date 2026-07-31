@@ -44,7 +44,9 @@ $manifest = [ordered]@{
             '000_create_schema_migrations.sql',
             '001_create_sharepoint_file_queue.sql',
             '002_add_pending_archive_to_import_files_status.sql',
-            '003_add_effective_date_to_stg_received_outbound.sql'
+            '003_add_effective_date_to_stg_received_outbound.sql',
+            '004_create_vw_import_report.sql',
+            '005_create_v_tbpayin_from_payment_outbound.sql'
         )
         D365_file_csv_import = @()
         finance_report = @()
