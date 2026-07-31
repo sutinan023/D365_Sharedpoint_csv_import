@@ -4,8 +4,8 @@ $policyPath = Join-Path $PSScriptRoot '..\tools\restore_acl_policy.ps1'
 $allowed = @('S-1-5-18','S-1-5-32-544')
 $safe = [pscustomobject]@{ owner_sid='S-1-5-18'; allow_aces=@([pscustomobject]@{sid='S-1-5-18';rights_value=2032127;is_inherited=$true},[pscustomobject]@{sid='S-1-5-32-545';rights_value=131241;is_inherited=$true}) }
 Assert-RestoreAclEvidence -Evidence $safe -AllowedWriterSids $allowed
-Assert-RestoreApproverToken -UserSid 'S-1-5-21-1-2-3-1001' -GroupSids @('S-1-5-32-544')
-try { Assert-RestoreApproverToken -UserSid 'S-1-5-21-1-2-3-1001' -GroupSids @('S-1-5-11'); throw 'Expected non-admin producer failure' } catch { if ($_.Exception.Message -eq 'Expected non-admin producer failure') { throw } }
+Assert-RestoreApproverToken -UserSid 'S-1-5-21-1-2-3-1001' -ActiveAdministrator $true
+try { Assert-RestoreApproverToken -UserSid 'S-1-5-21-1-2-3-1001' -ActiveAdministrator $false; throw 'Expected non-elevated producer failure' } catch { if ($_.Exception.Message -eq 'Expected non-elevated producer failure') { throw } }
 foreach ($bad in @(
   [pscustomobject]@{owner_sid='S-1-5-21-9-9-9-9';allow_aces=@()},
   [pscustomobject]@{owner_sid='S-1-5-18';allow_aces=@([pscustomobject]@{sid='S-1-5-21-9-9-9-9';rights_value=2;is_inherited=$true})},

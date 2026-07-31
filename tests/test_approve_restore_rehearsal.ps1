@@ -2,7 +2,8 @@ $ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path $PSScriptRoot '..\tools\approve_restore_rehearsal.ps1'
 $scriptSource = Get-Content -Raw $scriptPath
 if ($scriptSource -notmatch [regex]::Escape('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe') -or $scriptSource -match '&\s+powershell\.exe') { throw 'ACL helper invocation is vulnerable to PATH hijacking.' }
-$localAdminArgs = @{ LocalTestMode=$true; LocalTestApproverGroupSids=@('S-1-5-32-544') }
+$localAdminArgs = @{ LocalTestMode=$true; LocalTestActiveAdministrator=$true }
+if ($scriptSource -notmatch 'WindowsPrincipal' -or $scriptSource -notmatch 'IsInRole' -or $scriptSource -notmatch 'WindowsBuiltInRole.*Administrator') { throw 'Restore approver does not require an active elevated Administrator token.' }
 $root = Join-Path ([IO.Path]::GetTempPath()) ('approve-restore-test-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $root | Out-Null
 function Hash([string] $p) { (Get-FileHash -LiteralPath $p -Algorithm SHA256).Hash.ToLowerInvariant() }

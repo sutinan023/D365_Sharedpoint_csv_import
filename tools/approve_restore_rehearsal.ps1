@@ -5,7 +5,7 @@ param(
     [Parameter(Mandatory = $true)] [string] $OutputPath,
     [string] $ApprovalToken,
     [switch] $LocalTestMode,
-    [string[]] $LocalTestApproverGroupSids
+    [Nullable[bool]] $LocalTestActiveAdministrator
 )
 
 $ErrorActionPreference = 'Stop'
@@ -108,9 +108,10 @@ function Assert-ExactKeys($Object,[string[]]$Expected,[string]$Label) { $actual=
 $approverSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($approverSid -notmatch '^S-1-(?:[0-9]+-)+[0-9]+$') { throw 'Current approver SID could not be determined.' }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
-if ($LocalTestApproverGroupSids -and -not $LocalTestMode) { throw 'LocalTestApproverGroupSids is forbidden outside LocalTestMode.' }
-$approverGroups = if ($LocalTestMode -and $LocalTestApproverGroupSids) { $LocalTestApproverGroupSids } else { @($identity.Groups | ForEach-Object { $_.Value }) }
-Assert-RestoreApproverToken -UserSid $approverSid -GroupSids $approverGroups
+if ($PSBoundParameters.ContainsKey('LocalTestActiveAdministrator') -and -not $LocalTestMode) { throw 'LocalTestActiveAdministrator is forbidden outside LocalTestMode.' }
+if ($LocalTestMode -and $PSBoundParameters.ContainsKey('LocalTestActiveAdministrator')) { $activeAdministrator=[bool]$LocalTestActiveAdministrator }
+else { $principal=New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentList $identity; $activeAdministrator=$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator) }
+Assert-RestoreApproverToken -UserSid $approverSid -ActiveAdministrator $activeAdministrator
 $allowedWriterSids = @('S-1-5-18','S-1-5-32-544')
 $manifestFull=Get-FullPath $BackupManifestPath
 if ($LocalTestMode) { $temp=Get-FullPath ([IO.Path]::GetTempPath()); $trustedRoot=Get-FullPath (Split-Path -Parent $manifestFull); if ($trustedRoot -ieq $temp -or -not $trustedRoot.StartsWith($temp+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'LocalTestMode artifacts must use a dedicated directory under system temp.' } }

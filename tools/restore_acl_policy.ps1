@@ -17,6 +17,6 @@ function Assert-RestoreAclEvidence {
 }
 
 function Assert-RestoreApproverToken {
-    param([Parameter(Mandatory = $true)][string]$UserSid,[Parameter(Mandatory = $true)][string[]]$GroupSids)
-    if ($UserSid -notmatch '^S-1-(?:[0-9]+-)+[0-9]+$' -or 'S-1-5-32-544' -notin $GroupSids) { throw 'Restore approval requires a verified Builtin Administrators token.' }
+    param([Parameter(Mandatory = $true)][string]$UserSid,[Parameter(Mandatory = $true)][bool]$ActiveAdministrator)
+    if ($UserSid -notmatch '^S-1-(?:[0-9]+-)+[0-9]+$' -or -not $ActiveAdministrator) { throw 'Restore approval requires an active elevated Administrator token.' }
 }
