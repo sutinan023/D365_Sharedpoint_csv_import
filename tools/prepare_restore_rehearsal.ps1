@@ -130,6 +130,24 @@ function Add-SqlLexicalSpans {
             [void] $ProtectedSpans.Add([pscustomobject]@{ Index = $commentStart; Length = ($index - $commentStart) })
             continue
         }
+        if ($character -eq '`') {
+            $index++
+            $closed = $false
+            while ($index -lt $End) {
+                if ($Text[$index] -eq '`') {
+                    if (($index + 1) -lt $End -and $Text[$index + 1] -eq '`') {
+                        $index += 2
+                        continue
+                    }
+                    $index++
+                    $closed = $true
+                    break
+                }
+                $index++
+            }
+            if (-not $closed) { throw 'Source dump contains an unterminated backtick identifier.' }
+            continue
+        }
         if ($character -eq "'" -or $character -eq '"') {
             $quote = $character
             $stringStart = $index

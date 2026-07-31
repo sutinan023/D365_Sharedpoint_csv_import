@@ -96,12 +96,26 @@ try {
     $commentTrapHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $commentTrapPath).Hash.ToLowerInvariant()
     Assert-Throws { & $scriptPath -BackupPath $commentTrapPath -ExpectedSourceSha256 $commentTrapHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$commentTrapPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'outside a recognized VIEW'
 
+    foreach ($outsideSql in @(
+        "CREATE TABLE ``a'foo`` AS SELECT * FROM ``D365_finance``.``outside_source`` AS ``b'bar``;",
+        'CREATE TABLE `a"foo``bar` AS SELECT * FROM `D365_finance`.`outside_source`;'
+    )) {
+        $backtickPath = Join-Path $testRoot ('backtick-{0}.sql' -f [guid]::NewGuid())
+        [IO.File]::WriteAllText($backtickPath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$outsideSql`n"), (New-Object Text.UTF8Encoding($false)))
+        $backtickHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $backtickPath).Hash.ToLowerInvariant()
+        Assert-Throws { & $scriptPath -BackupPath $backtickPath -ExpectedSourceSha256 $backtickHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$backtickPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'outside a recognized VIEW'
+    }
+
     foreach ($unterminatedSuffix in @('/* missing end', "'missing end")) {
         $unterminatedPath = Join-Path $testRoot ('unterminated-{0}.sql' -f [guid]::NewGuid())
         [IO.File]::WriteAllText($unterminatedPath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$unterminatedSuffix"), (New-Object Text.UTF8Encoding($false)))
         $unterminatedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $unterminatedPath).Hash.ToLowerInvariant()
         Assert-Throws { & $scriptPath -BackupPath $unterminatedPath -ExpectedSourceSha256 $unterminatedHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$unterminatedPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'unterminated'
     }
+    $unterminatedBacktickPath = Join-Path $testRoot 'unterminated-backtick.sql'
+    [IO.File]::WriteAllText($unterminatedBacktickPath, ((Get-TestDump -DatabaseName 'D365_finance') + "`nSELECT * FROM ``unterminated"), (New-Object Text.UTF8Encoding($false)))
+    $unterminatedBacktickHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $unterminatedBacktickPath).Hash.ToLowerInvariant()
+    Assert-Throws { & $scriptPath -BackupPath $unterminatedBacktickPath -ExpectedSourceSha256 $unterminatedBacktickHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$unterminatedBacktickPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'unterminated backtick'
 
     foreach ($objectSql in @(
         'CREATE TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET @x = 1;',
