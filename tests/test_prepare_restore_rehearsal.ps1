@@ -56,6 +56,22 @@ try {
     $audit = Get-Content -Raw -LiteralPath $auditPath | ConvertFrom-Json
     if ($audit.source_sha256 -cne $sourceHash -or $audit.definer_count -ne 2 -or $audit.qualified_reference_count -ne 22) { throw 'Audit receipt is incomplete.' }
 
+    $lowercaseSourcePath = Join-Path $testRoot 'lowercase-source.sql'
+    $lowercaseOutputPath = Join-Path $testRoot 'lowercase-sanitized.sql'
+    [IO.File]::WriteAllText($lowercaseSourcePath, (Get-TestDump -DatabaseName 'd365_finance'), (New-Object Text.UTF8Encoding($false)))
+    $lowercaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $lowercaseSourcePath).Hash.ToLowerInvariant()
+    & $scriptPath -BackupPath $lowercaseSourcePath -ExpectedSourceSha256 $lowercaseHash `
+        -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' `
+        -OutputPath $lowercaseOutputPath -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 | Out-Null
+    $lowercaseSanitized = [IO.File]::ReadAllText($lowercaseOutputPath)
+    if (([regex]::Matches($lowercaseSanitized, '`D365_finance_rehearsal_20260731_2130`\.')).Count -ne 22) { throw 'Lowercase source qualifiers did not receive the exact rehearsal spelling.' }
+    if ($lowercaseSanitized -match '`d365_finance`\.') { throw 'Lowercase source qualifiers remained after sanitization.' }
+
+    $mixedOutsidePath = Join-Path $testRoot 'mixed-outside.sql'
+    [IO.File]::WriteAllText($mixedOutsidePath, ((Get-TestDump -DatabaseName 'd365_finance') + "`nSELECT * FROM ``D365_Finance``.``outside_source``;`n"), (New-Object Text.UTF8Encoding($false)))
+    $mixedOutsideHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $mixedOutsidePath).Hash.ToLowerInvariant()
+    Assert-Throws { & $scriptPath -BackupPath $mixedOutsidePath -ExpectedSourceSha256 $mixedOutsideHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath "$mixedOutsidePath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'outside a recognized VIEW'
+
     Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 ('0' * 64) -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath (Join-Path $testRoot 'bad-hash.sql') -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'hash'
     Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath (Join-Path $testRoot 'bad-count.sql') -ExpectedDefinerCount 1 -ExpectedQualifiedReferenceCount 22 } 'definer'
     Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'bad-name' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' -OutputPath (Join-Path $testRoot 'bad-name.sql') -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'database'

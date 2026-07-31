@@ -65,7 +65,7 @@ function Get-Sha256Hex {
 
 Assert-SafeDatabaseName -Name $SourceDatabase -Label 'Source'
 Assert-SafeDatabaseName -Name $RehearsalDatabase -Label 'Rehearsal'
-if ($SourceDatabase -ceq $RehearsalDatabase) {
+if ($SourceDatabase -ieq $RehearsalDatabase) {
     throw 'Source and rehearsal database names must be different.'
 }
 
@@ -198,6 +198,7 @@ if ($sourceText -match '(?is)\b(?:CREATE|DROP|ALTER)\b[^;]{0,1000}\b(?:TRIGGER|P
 
 $definerPattern = '(?is)\bDEFINER\s*=\s*`[^`]+`\s*@\s*`[^`]+`\s+SQL\s+SECURITY\s+DEFINER\b'
 $sourceQualifierPattern = '`' + [regex]::Escape($SourceDatabase) + '`\.'
+$sourceQualifierOptions = [Text.RegularExpressions.RegexOptions]::IgnoreCase
 $viewBlockPattern = '(?is)/\*!\d{5}\s+CREATE\s+ALGORITHM\b.*?\bVIEW\b.*?\*/;'
 $viewBlocks = [regex]::Matches($sourceText, $viewBlockPattern)
 function Test-MatchInsideRanges {
@@ -225,19 +226,19 @@ function Convert-ViewBlock {
     foreach ($protectedSpan in $protectedSpans) {
         $nonStringSegment = $Block.Substring($cursor, $protectedSpan.Index - $cursor)
         $nonStringSegment = [regex]::Replace($nonStringSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
-        $nonStringSegment = [regex]::Replace($nonStringSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'))
+        $nonStringSegment = [regex]::Replace($nonStringSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         [void] $builder.Append($nonStringSegment)
         [void] $builder.Append($Block.Substring($protectedSpan.Index, $protectedSpan.Length))
         $cursor = $protectedSpan.Index + $protectedSpan.Length
     }
     $remainingSegment = $Block.Substring($cursor)
     $remainingSegment = [regex]::Replace($remainingSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
-    $remainingSegment = [regex]::Replace($remainingSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'))
+    $remainingSegment = [regex]::Replace($remainingSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
     [void] $builder.Append($remainingSegment)
     return $builder.ToString()
 }
 $allDefiners = @([regex]::Matches($sourceText, $definerPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
-$allQualifiedReferences = @([regex]::Matches($sourceText, $sourceQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
+$allQualifiedReferences = @([regex]::Matches($sourceText, $sourceQualifierPattern, $sourceQualifierOptions) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
 $outsideDefiners = @($allDefiners | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $viewBlocks) })
 $outsideQualifiedReferences = @($allQualifiedReferences | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $viewBlocks) })
 if ($outsideDefiners.Count -ne 0 -or $outsideQualifiedReferences.Count -ne 0) {
@@ -267,7 +268,7 @@ $sanitizedText = $textBuilder.ToString()
 $rehearsalQualifierPattern = '`' + [regex]::Escape($RehearsalDatabase) + '`\.'
 $sanitizedLexicalSpans = Get-SqlLexicalSpans -Text $sanitizedText
 $remainingDefiners = @([regex]::Matches($sanitizedText, '(?i)\bDEFINER\s*=|\bSQL\s+SECURITY\s+DEFINER\b') | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })
-$remainingSourceQualifiers = @([regex]::Matches($sanitizedText, $sourceQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })
+$remainingSourceQualifiers = @([regex]::Matches($sanitizedText, $sourceQualifierPattern, $sourceQualifierOptions) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })
 if ($remainingDefiners.Count -ne 0) {
     throw 'Sanitized dump retained a definer security clause.'
 }
