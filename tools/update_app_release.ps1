@@ -167,9 +167,14 @@ try {
         throw 'Another APP_RELEASE updater is already running or the exclusive lock cannot be acquired.'
     }
 
+    $environmentFiles = @(
+        (Join-Path $environmentRootFull 'D365_Sharedpoint_csv_import\config\.env'),
+        (Join-Path $environmentRootFull 'D365_file_csv_import\.env'),
+        (Join-Path $environmentRootFull 'finance_report\.env')
+    )
     $records = @()
-    foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
-        $records += Get-ConfigRecord -Path (Join-Path $environmentRootFull "$project\config\.env") -ExpectedEnvironment $expectedEnvironment -ExpectedDatabase $expectedDatabase
+    foreach ($environmentFile in $environmentFiles) {
+        $records += Get-ConfigRecord -Path $environmentFile -ExpectedEnvironment $expectedEnvironment -ExpectedDatabase $expectedDatabase
     }
     $oldReleases = @($records | ForEach-Object Release | Select-Object -Unique)
     if ($oldReleases.Count -ne 1) { throw 'Current APP_RELEASE values must be identical across all projects.' }

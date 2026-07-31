@@ -5,14 +5,20 @@ $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('update-app-release-test-{0}' 
 $auditRoot = Join-Path $testRoot 'audit'
 $secret = 'never-print-this-secret-7dd3'
 
+function Get-EnvironmentFilePath {
+    param([string] $Root, [string] $Project)
+    if ($Project -ceq 'D365_Sharedpoint_csv_import') { return Join-Path $Root "$Project\config\.env" }
+    return Join-Path $Root "$Project\.env"
+}
+
 function New-TestEnvironment {
     param([string] $Name = 'uat', [string] $Release = '2026-07-31.8', [string] $DbName = 'D365_finance', [string] $AppEnv = 'UAT')
     $root = Join-Path $testRoot $Name
     foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
-        $config = Join-Path $root "$project\config"
-        New-Item -ItemType Directory -Path $config -Force | Out-Null
+        $envPath = Get-EnvironmentFilePath $root $project
+        New-Item -ItemType Directory -Path (Split-Path -Parent $envPath) -Force | Out-Null
         $text = "# retained comment`r`nAPP_ENV=$AppEnv`r`nAPP_RELEASE=$Release`r`nDB_NAME=$DbName`r`nDB_PASS=$secret`r`n"
-        [IO.File]::WriteAllText((Join-Path $config '.env'), $text, [Text.UTF8Encoding]::new($false))
+        [IO.File]::WriteAllText($envPath, $text, [Text.UTF8Encoding]::new($false))
     }
     return $root
 }
@@ -28,7 +34,7 @@ function Get-EnvironmentSnapshots {
     param([string] $Root)
     $snapshots = @{}
     foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
-        $path = Join-Path $Root "$project\config\.env"
+        $path = Get-EnvironmentFilePath $Root $project
         $snapshots[$path] = [IO.File]::ReadAllBytes($path)
     }
     return $snapshots
@@ -66,6 +72,26 @@ try {
 
     $second = (& $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $uatRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' | Out-String | ConvertFrom-Json)
     if ($second.status -cne 'NO_CHANGE') { throw 'Idempotent rerun did not report NO_CHANGE.' }
+
+    $exactRoot = New-TestEnvironment -Name exact-paths
+    $allBefore = @{}
+    foreach ($project in @('D365_file_csv_import', 'finance_report')) {
+        $decoy = Join-Path $exactRoot "$project\config\.env"
+        New-Item -ItemType Directory -Path (Split-Path -Parent $decoy) -Force | Out-Null
+        [IO.File]::WriteAllText($decoy, "APP_ENV=UAT`r`nAPP_RELEASE=decoy`r`nDB_NAME=D365_finance`r`nDB_PASS=$secret`r`n", [Text.UTF8Encoding]::new($false))
+    }
+    foreach ($file in Get-ChildItem -LiteralPath $exactRoot -Filter '.env' -File -Recurse) { $allBefore[$file.FullName] = [IO.File]::ReadAllBytes($file.FullName) }
+    & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $exactRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' | Out-Null
+    $expectedChanged = @(
+        (Get-EnvironmentFilePath $exactRoot 'D365_Sharedpoint_csv_import'),
+        (Get-EnvironmentFilePath $exactRoot 'D365_file_csv_import'),
+        (Get-EnvironmentFilePath $exactRoot 'finance_report')
+    )
+    foreach ($path in $allBefore.Keys) {
+        $changed = [Convert]::ToBase64String($allBefore[$path]) -cne [Convert]::ToBase64String([IO.File]::ReadAllBytes($path))
+        $shouldChange = $expectedChanged -contains $path
+        if ($changed -ne $shouldChange) { throw "Updater changed the wrong environment path: $path" }
+    }
 
     $secondUpdateRoot = New-TestEnvironment -Name second-success
     $secondUpdate = (& $scriptPath -Environment UAT -ReleaseId '2026-07-31.10' -EnvironmentRoot $secondUpdateRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.10' | Out-String | ConvertFrom-Json)
@@ -110,7 +136,7 @@ try {
         @{ Key = 'APP_RELEASE'; Old = 'APP_RELEASE=2026-07-31.8'; New = 'APP_RELEASE=2026-07-31.8#evil' }
     )) {
         $hashRoot = New-TestEnvironment -Name ('hash-in-' + $hashCase.Key.ToLowerInvariant())
-        $hashPath = Join-Path $hashRoot 'finance_report\config\.env'
+        $hashPath = Get-EnvironmentFilePath $hashRoot 'finance_report'
         [IO.File]::WriteAllText($hashPath, ((Get-Content -LiteralPath $hashPath -Raw) -replace [regex]::Escape($hashCase.Old), $hashCase.New), [Text.UTF8Encoding]::new($false))
         $hashSnapshots = Get-EnvironmentSnapshots $hashRoot
         Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $hashRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } $hashCase.Key
@@ -119,7 +145,7 @@ try {
 
     foreach ($key in @('APP_ENV', 'APP_RELEASE', 'DB_NAME')) {
         $quoteRoot = New-TestEnvironment -Name ('mismatched-quote-' + $key.ToLowerInvariant())
-        $quotePath = Join-Path $quoteRoot 'D365_file_csv_import\config\.env'
+        $quotePath = Get-EnvironmentFilePath $quoteRoot 'D365_file_csv_import'
         $quoteText = Get-Content -LiteralPath $quotePath -Raw
         $quoteText = $quoteText -replace "(?m)^$key=(.*)$", "$key=`"`$1'"
         [IO.File]::WriteAllText($quotePath, $quoteText, [Text.UTF8Encoding]::new($false))
@@ -129,12 +155,12 @@ try {
     }
 
     $escapeRoot = New-TestEnvironment -Name escaped-scalar
-    $escapePath = Join-Path $escapeRoot 'D365_file_csv_import\config\.env'
+    $escapePath = Get-EnvironmentFilePath $escapeRoot 'D365_file_csv_import'
     [IO.File]::WriteAllText($escapePath, ((Get-Content -LiteralPath $escapePath -Raw) -replace 'DB_NAME=D365_finance', 'DB_NAME="D365_finance\""'), [Text.UTF8Encoding]::new($false))
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $escapeRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'DB_NAME'
 
     $caseReleaseRoot = New-TestEnvironment -Name case-release -Release Release-A
-    $caseReleasePath = Join-Path $caseReleaseRoot 'finance_report\config\.env'
+    $caseReleasePath = Get-EnvironmentFilePath $caseReleaseRoot 'finance_report'
     [IO.File]::WriteAllText($caseReleasePath, ((Get-Content -LiteralPath $caseReleasePath -Raw) -replace 'APP_RELEASE=Release-A', 'APP_RELEASE=release-a'), [Text.UTF8Encoding]::new($false))
     $caseReleaseSnapshots = Get-EnvironmentSnapshots $caseReleaseRoot
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId 'Release-B' -EnvironmentRoot $caseReleaseRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE Release-B' } 'identical'
@@ -142,7 +168,7 @@ try {
 
     $commentRoot = New-TestEnvironment -Name quoted-comments
     foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
-        $commentPath = Join-Path $commentRoot "$project\config\.env"
+        $commentPath = Get-EnvironmentFilePath $commentRoot $project
         $commentText = Get-Content -LiteralPath $commentPath -Raw
         $commentText = $commentText -replace 'APP_ENV=UAT', 'APP_ENV="UAT" # environment'
         $commentText = $commentText -replace 'APP_RELEASE=2026-07-31.8', "APP_RELEASE='2026-07-31.8' # release"
@@ -151,14 +177,14 @@ try {
     }
     $commentResult = (& $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $commentRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' | Out-String | ConvertFrom-Json)
     if ($commentResult.status -cne 'UPDATED') { throw 'Valid paired quotes and outside comments were rejected.' }
-    $commentAfter = Get-Content -LiteralPath (Join-Path $commentRoot 'finance_report\config\.env') -Raw
+    $commentAfter = Get-Content -LiteralPath (Get-EnvironmentFilePath $commentRoot 'finance_report') -Raw
     if ($commentAfter -notmatch "APP_RELEASE='2026-07-31\.9' # release" -or $commentAfter -notmatch 'APP_ENV="UAT" # environment') { throw 'Quoted release update did not preserve quotes/comments.' }
 
     $lowerEnvRoot = New-TestEnvironment -Name lowercase-env -AppEnv uat
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $lowerEnvRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'APP_ENV'
 
     $bomRoot = New-TestEnvironment -Name utf8-bom
-    $bomPath = Join-Path $bomRoot 'finance_report\config\.env'
+    $bomPath = Get-EnvironmentFilePath $bomRoot 'finance_report'
     $bomBody = [IO.File]::ReadAllBytes($bomPath)
     $bomBytes = [byte[]](0xEF, 0xBB, 0xBF) + $bomBody
     [IO.File]::WriteAllBytes($bomPath, $bomBytes)
@@ -167,7 +193,7 @@ try {
     if ($bomAfter[0] -ne 0xEF -or $bomAfter[1] -ne 0xBB -or $bomAfter[2] -ne 0xBF) { throw 'UTF-8 BOM was not preserved.' }
 
     $invalidUtf8Root = New-TestEnvironment -Name invalid-utf8
-    $invalidUtf8Path = Join-Path $invalidUtf8Root 'finance_report\config\.env'
+    $invalidUtf8Path = Get-EnvironmentFilePath $invalidUtf8Root 'finance_report'
     $validBytes = [IO.File]::ReadAllBytes($invalidUtf8Path)
     [IO.File]::WriteAllBytes($invalidUtf8Path, ($validBytes + [byte[]](0xC3, 0x28)))
     $invalidSnapshots = Get-EnvironmentSnapshots $invalidUtf8Root
@@ -185,13 +211,13 @@ try {
     $badDbRoot = New-TestEnvironment -Name bad-db -DbName D365_finance_prod
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $badDbRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'DB_NAME'
     $mismatchRoot = New-TestEnvironment -Name mismatch
-    [IO.File]::WriteAllText((Join-Path $mismatchRoot 'finance_report\config\.env'), "APP_ENV=UAT`r`nAPP_RELEASE=different`r`nDB_NAME=D365_finance`r`nDB_PASS=$secret`r`n")
+    [IO.File]::WriteAllText((Get-EnvironmentFilePath $mismatchRoot 'finance_report'), "APP_ENV=UAT`r`nAPP_RELEASE=different`r`nDB_NAME=D365_finance`r`nDB_PASS=$secret`r`n")
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $mismatchRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'identical'
     $duplicateRoot = New-TestEnvironment -Name duplicate
-    Add-Content (Join-Path $duplicateRoot 'D365_file_csv_import\config\.env') 'APP_RELEASE=duplicate'
+    Add-Content (Get-EnvironmentFilePath $duplicateRoot 'D365_file_csv_import') 'APP_RELEASE=duplicate'
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $duplicateRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'exactly one'
     $missingRoot = New-TestEnvironment -Name missing
-    Remove-Item -LiteralPath (Join-Path $missingRoot 'finance_report\config\.env') -Force
+    Remove-Item -LiteralPath (Get-EnvironmentFilePath $missingRoot 'finance_report') -Force
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $missingRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'not found'
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '../unsafe' -EnvironmentRoot $uatRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE ../unsafe' } 'ReleaseId'
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot 'C:\xampp\htdocs\uat' -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'LocalTestMode'
