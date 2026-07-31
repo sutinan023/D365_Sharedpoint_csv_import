@@ -10,7 +10,7 @@ return [
         file_put_contents($backup, 'SQL BACKUP');
         $hash = hash_file('sha256', $backup);
         $manifest = $directory . '/backup.sql.json';
-        file_put_contents($manifest, json_encode([
+        file_put_contents($manifest, "\xEF\xBB\xBF" . json_encode([
             'database' => 'D365_finance_prod',
             'release_id' => 'r1',
             'backup_file' => $backup,
@@ -18,7 +18,7 @@ return [
             'size_bytes' => filesize($backup),
         ]));
         $receipt = $directory . '/backup.sql.restore-approved.json';
-        file_put_contents($receipt, json_encode([
+        file_put_contents($receipt, "\xEF\xBB\xBF" . json_encode([
             'status' => 'PASSED',
             'release_id' => 'r1',
             'backup_sha256' => $hash,

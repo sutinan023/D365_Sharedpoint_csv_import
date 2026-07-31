@@ -49,7 +49,11 @@ final class BackupCheckpointValidator
         if (!is_file($path)) {
             throw new RuntimeException(ucfirst($label) . ' not found.');
         }
-        $value = json_decode((string)file_get_contents($path), true);
+        $contents = (string)file_get_contents($path);
+        if (str_starts_with($contents, "\xEF\xBB\xBF")) {
+            $contents = substr($contents, 3);
+        }
+        $value = json_decode($contents, true);
         if (!is_array($value)) {
             throw new RuntimeException(ucfirst($label) . ' is not valid JSON.');
         }
