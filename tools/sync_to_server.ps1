@@ -55,7 +55,7 @@ function Test-ExcludedPath {
 if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
     $SourceRoot = Split-Path -Parent $PSScriptRoot
 }
-$source = (Resolve-Path -LiteralPath $SourceRoot).Path.TrimEnd('\', '/')
+$source = (Resolve-Path -LiteralPath $SourceRoot).ProviderPath.TrimEnd('\', '/')
 
 $expectedDestination = if ($Environment -eq 'UAT') {
     "\\100.1.1.166\htdocs\uat\$ProjectName"
@@ -82,7 +82,7 @@ if ($LocalTestMode) {
 if (-not (Test-Path -LiteralPath $DestinationRoot -PathType Container)) {
     throw "Destination directory not found: $DestinationRoot"
 }
-$destination = (Resolve-Path -LiteralPath $DestinationRoot).Path.TrimEnd('\', '/')
+$destination = (Resolve-Path -LiteralPath $DestinationRoot).ProviderPath.TrimEnd('\', '/')
 
 if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
     throw "Release manifest not found: $ManifestPath"
