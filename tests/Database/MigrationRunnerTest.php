@@ -59,6 +59,33 @@ return [
         unlink($migration);
         rmdir($directory);
     },
+    'migration runner accepts legacy raw newline checksums for logically identical SQL' => function (): void {
+        $pdo = new PDO('sqlite::memory:');
+        $directory = sys_get_temp_dir() . '/migration-runner-legacy-newlines-' . bin2hex(random_bytes(4));
+        mkdir($directory);
+        $migration = $directory . '/001_create_sample.sql';
+        $lfSql = "CREATE TABLE sample_records (id INTEGER PRIMARY KEY);\n";
+        $crlfSql = str_replace("\n", "\r\n", $lfSql);
+        file_put_contents($migration, $crlfSql);
+
+        $runner = new MigrationRunner($pdo);
+        assert($runner->applyDirectory('test_project', $directory, 'release-1', 'tester') === ['001_create_sample.sql']);
+
+        $statement = $pdo->prepare(
+            'UPDATE schema_migrations SET checksum_sha256 = ? WHERE project_name = ? AND version = ?'
+        );
+        $statement->execute([hash('sha256', $crlfSql), 'test_project', '001_create_sample.sql']);
+        file_put_contents($migration, $lfSql);
+
+        assert($runner->applyDirectory('test_project', $directory, 'release-2', 'tester') === []);
+
+        $legacyCrSql = str_replace("\n", "\r", $lfSql);
+        $statement->execute([hash('sha256', $legacyCrSql), 'test_project', '001_create_sample.sql']);
+        assert($runner->applyDirectory('test_project', $directory, 'release-3', 'tester') === []);
+
+        unlink($migration);
+        rmdir($directory);
+    },
     'migration runner records failure and blocks automatic retry' => function (): void {
         $pdo = new PDO('sqlite::memory:');
         $directory = sys_get_temp_dir() . '/migration-runner-failure-' . bin2hex(random_bytes(4));

@@ -40,14 +40,15 @@ final class MigrationRunner
 
         foreach ($files as $file) {
             $version = basename($file);
-            $checksum = $this->checksum($file);
-            if ($checksum === null) {
+            $checksums = $this->checksums($file);
+            if ($checksums === null) {
                 throw new RuntimeException("Unable to hash migration: {$version}");
             }
+            $checksum = $checksums['canonical'];
 
             $existing = $this->find($projectName, $version);
             if ($existing !== null) {
-                if (!hash_equals($existing['checksum_sha256'], $checksum)) {
+                if (!$this->matchesChecksum($existing['checksum_sha256'], $checksums['accepted'])) {
                     throw new RuntimeException("Migration checksum mismatch: {$projectName}/{$version}");
                 }
                 if ($existing['status'] !== 'APPLIED') {
@@ -127,14 +128,34 @@ final class MigrationRunner
         return $row === false ? null : $row;
     }
 
-    private function checksum(string $file): ?string
+    private function checksums(string $file): ?array
     {
         $contents = file_get_contents($file);
         if ($contents === false) {
             return null;
         }
 
-        return hash('sha256', str_replace(["\r\n", "\r"], "\n", $contents));
+        $canonical = str_replace(["\r\n", "\r"], "\n", $contents);
+
+        return [
+            'canonical' => hash('sha256', $canonical),
+            'accepted' => array_unique([
+                hash('sha256', $canonical),
+                hash('sha256', str_replace("\n", "\r\n", $canonical)),
+                hash('sha256', str_replace("\n", "\r", $canonical)),
+            ]),
+        ];
+    }
+
+    private function matchesChecksum(string $storedChecksum, array $acceptedChecksums): bool
+    {
+        foreach ($acceptedChecksums as $checksum) {
+            if (hash_equals($storedChecksum, $checksum)) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private function acquireLock(string $name): void
