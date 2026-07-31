@@ -62,18 +62,36 @@ function Get-Sha256 {
 function Get-FileTextState {
     param([string] $Path)
     $bytes = [IO.File]::ReadAllBytes($Path)
-    $encoding = [Text.UTF8Encoding]::new($false)
+    $encoding = [Text.UTF8Encoding]::new($false, $true)
     $preamble = [byte[]]@()
     $offset = 0
     if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
         $preamble = $bytes[0..2]; $offset = 3
-    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFF -and $bytes[1] -eq 0xFE) {
-        $encoding = [Text.UnicodeEncoding]::new($false, $false); $preamble = $bytes[0..1]; $offset = 2
-    } elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 0xFE -and $bytes[1] -eq 0xFF) {
-        $encoding = [Text.UnicodeEncoding]::new($true, $false); $preamble = $bytes[0..1]; $offset = 2
     }
-    $text = $encoding.GetString($bytes, $offset, $bytes.Length - $offset)
+    try { $text = $encoding.GetString($bytes, $offset, $bytes.Length - $offset) }
+    catch [Text.DecoderFallbackException] { throw 'Environment file is not valid UTF-8.' }
     [pscustomobject]@{ Bytes = $bytes; Encoding = $encoding; Preamble = $preamble; Text = $text }
+}
+
+function Get-DotEnvScalar {
+    param([string] $Line, [string] $Key)
+    $prefix = [regex]::Match($Line, ('^[ \t]*' + [regex]::Escape($Key) + '[ \t]*=[ \t]*'))
+    if (-not $prefix.Success) { throw "$Key is not a valid dotenv assignment." }
+    $scalar = $Line.Substring($prefix.Length)
+    if ($scalar.StartsWith('"') -or $scalar.StartsWith("'")) {
+        $quote = $scalar.Substring(0, 1)
+        $quotedPattern = if ($quote -ceq '"') { '^"(?<value>[^"\\\r\n]*)"(?<suffix>[ \t]*(?:#.*)?)$' } else { "^'(?<value>[^'\\\r\n]*)'(?<suffix>[ \t]*(?:#.*)?)$" }
+        $match = [regex]::Match($scalar, $quotedPattern)
+        if (-not $match.Success) { throw "$Key must use paired quotes with no escapes or trailing content." }
+    } else {
+        $match = [regex]::Match($scalar, '^(?<value>[A-Za-z0-9._:/#-]+)(?<suffix>[ \t]*(?:#.*)?)$')
+        if (-not $match.Success) { throw "$Key must contain one safe unquoted dotenv value." }
+    }
+    [pscustomobject]@{
+        Value = $match.Groups['value'].Value
+        ValueIndex = $prefix.Length + $match.Groups['value'].Index
+        ValueLength = $match.Groups['value'].Length
+    }
 }
 
 function Get-ConfigRecord {
@@ -82,27 +100,28 @@ function Get-ConfigRecord {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { throw "Environment file not found: $Path" }
     $state = Get-FileTextState $Path
     $values = @{}
+    $releaseValueIndex = $null
+    $releaseValueLength = $null
     foreach ($key in @('APP_ENV', 'APP_RELEASE', 'DB_NAME')) {
-        $matches = [regex]::Matches($state.Text, "(?m)^\s*$key\s*=.*$")
+        $matches = [regex]::Matches($state.Text, ("(?m)^[ \t]*" + [regex]::Escape($key) + "[ \t]*=[^\r\n]*"))
         if ($matches.Count -ne 1) { throw "$key must appear exactly one time in every environment file." }
+        $lineMatch = $matches.Item(0)
+        $scalar = Get-DotEnvScalar $lineMatch.Value $key
+        $values[$key] = $scalar.Value
         if ($key -eq 'APP_RELEASE') {
-            $safeMatch = [regex]::Match($matches[0].Value, "^\s*APP_RELEASE\s*=\s*(?<value>$safeReleasePattern)\s*$")
-            if (-not $safeMatch.Success) { throw 'APP_RELEASE must contain exactly one safe release ID with no trailing text or comment.' }
-            $values[$key] = $safeMatch.Groups['value'].Value
-        } else {
-            $raw = $matches[0].Value -replace "^\s*$key\s*=\s*", ''
-            $values[$key] = ($raw -replace '\s*(?:#.*)?$', '').Trim().Trim('"').Trim("'")
+            if ($scalar.Value -notmatch "^$safeReleasePattern$") { throw 'APP_RELEASE must contain exactly one safe release ID.' }
+            $releaseValueIndex = $lineMatch.Index + $scalar.ValueIndex
+            $releaseValueLength = $scalar.ValueLength
         }
     }
-    if ($values.APP_ENV.ToUpperInvariant() -cne $ExpectedEnvironment) { throw 'APP_ENV does not match the requested environment.' }
+    if ($values.APP_ENV -cne $ExpectedEnvironment) { throw 'APP_ENV does not match the requested environment.' }
     if ($values.DB_NAME -cne $ExpectedDatabase) { throw 'DB_NAME does not match the requested environment.' }
-    [pscustomobject]@{ Path = Get-CanonicalPath $Path; State = $state; Release = $values.APP_RELEASE }
+    [pscustomobject]@{ Path = Get-CanonicalPath $Path; State = $state; Release = $values.APP_RELEASE; ReleaseValueIndex = $releaseValueIndex; ReleaseValueLength = $releaseValueLength }
 }
 
 function Get-ReplacementBytes {
     param($Record, [string] $NewRelease)
-    $linePattern = "(?m)^(\s*APP_RELEASE\s*=\s*)$safeReleasePattern(\s*)$"
-    $updatedText = [regex]::Replace($Record.State.Text, $linePattern, ('${1}' + $NewRelease + '${2}'), 1)
+    $updatedText = $Record.State.Text.Substring(0, $Record.ReleaseValueIndex) + $NewRelease + $Record.State.Text.Substring($Record.ReleaseValueIndex + $Record.ReleaseValueLength)
     if ($updatedText -ceq $Record.State.Text) { throw 'APP_RELEASE line could not be updated safely.' }
     $body = $Record.State.Encoding.GetBytes($updatedText)
     if ($Record.State.Preamble.Length -eq 0) { return $body }

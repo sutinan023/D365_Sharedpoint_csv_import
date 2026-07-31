@@ -56,7 +56,10 @@ try {
     $after = [IO.File]::ReadAllBytes($beforePath)
     $beforeText = [Text.Encoding]::UTF8.GetString($before)
     $afterText = [Text.Encoding]::UTF8.GetString($after)
-    if (($afterText -replace 'APP_RELEASE=2026-07-31.9', 'APP_RELEASE=2026-07-31.8') -cne $beforeText) { throw 'Updater changed more than the APP_RELEASE line.' }
+    if (($afterText -replace 'APP_RELEASE=2026-07-31.9', 'APP_RELEASE=2026-07-31.8') -cne $beforeText) {
+        $differencePositions = @(for ($i = 0; $i -lt $beforeText.Length; $i++) { if ($beforeText[$i] -cne $afterText[$i]) { $i } })
+        throw "Updater changed more than the APP_RELEASE line (difference positions: $($differencePositions -join ','))."
+    }
     if ($resultText -match [regex]::Escape($secret)) { throw 'Secret appeared in command output.' }
     $audit = Get-Content -LiteralPath $result.audit_file -Raw
     if ($audit -match [regex]::Escape($secret) -or $audit -match 'DB_PASS') { throw 'Secret appeared in audit.' }
@@ -83,7 +86,7 @@ try {
         Assert-SnapshotsUnchanged $snapshots
     }
 
-    foreach ($suffix in @('trailing text', '# forbidden comment')) {
+    foreach ($suffix in @('trailing text')) {
         $malformedRoot = New-TestEnvironment -Name ('malformed-' + [guid]::NewGuid())
         $malformedPath = Join-Path $malformedRoot 'D365_Sharedpoint_csv_import\config\.env'
         $malformed = (Get-Content -LiteralPath $malformedPath -Raw) -replace 'APP_RELEASE=2026-07-31.8', "APP_RELEASE=2026-07-31.8 $suffix"
@@ -92,6 +95,86 @@ try {
         Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $malformedRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'APP_RELEASE.*safe'
         Assert-SnapshotsUnchanged $snapshots
     }
+
+    $hashDbRoot = New-TestEnvironment -Name hash-in-db
+    $hashDbPath = Join-Path $hashDbRoot 'D365_Sharedpoint_csv_import\config\.env'
+    [IO.File]::WriteAllText($hashDbPath, ((Get-Content -LiteralPath $hashDbPath -Raw) -replace 'DB_NAME=D365_finance', 'DB_NAME=D365_finance#evil'), [Text.UTF8Encoding]::new($false))
+    $hashDbSnapshots = Get-EnvironmentSnapshots $hashDbRoot
+    $hashDbAuditCount = @(Get-ChildItem -LiteralPath $auditRoot -Filter '*.json').Count
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $hashDbRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'DB_NAME'
+    Assert-SnapshotsUnchanged $hashDbSnapshots
+    if (@(Get-ChildItem -LiteralPath $auditRoot -Filter '*.json').Count -ne $hashDbAuditCount) { throw 'Rejected DB_NAME created an audit file.' }
+
+    foreach ($hashCase in @(
+        @{ Key = 'APP_ENV'; Old = 'APP_ENV=UAT'; New = 'APP_ENV=UAT#evil' },
+        @{ Key = 'APP_RELEASE'; Old = 'APP_RELEASE=2026-07-31.8'; New = 'APP_RELEASE=2026-07-31.8#evil' }
+    )) {
+        $hashRoot = New-TestEnvironment -Name ('hash-in-' + $hashCase.Key.ToLowerInvariant())
+        $hashPath = Join-Path $hashRoot 'finance_report\config\.env'
+        [IO.File]::WriteAllText($hashPath, ((Get-Content -LiteralPath $hashPath -Raw) -replace [regex]::Escape($hashCase.Old), $hashCase.New), [Text.UTF8Encoding]::new($false))
+        $hashSnapshots = Get-EnvironmentSnapshots $hashRoot
+        Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $hashRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } $hashCase.Key
+        Assert-SnapshotsUnchanged $hashSnapshots
+    }
+
+    foreach ($key in @('APP_ENV', 'APP_RELEASE', 'DB_NAME')) {
+        $quoteRoot = New-TestEnvironment -Name ('mismatched-quote-' + $key.ToLowerInvariant())
+        $quotePath = Join-Path $quoteRoot 'D365_file_csv_import\config\.env'
+        $quoteText = Get-Content -LiteralPath $quotePath -Raw
+        $quoteText = $quoteText -replace "(?m)^$key=(.*)$", "$key=`"`$1'"
+        [IO.File]::WriteAllText($quotePath, $quoteText, [Text.UTF8Encoding]::new($false))
+        $quoteSnapshots = Get-EnvironmentSnapshots $quoteRoot
+        Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $quoteRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } $key
+        Assert-SnapshotsUnchanged $quoteSnapshots
+    }
+
+    $escapeRoot = New-TestEnvironment -Name escaped-scalar
+    $escapePath = Join-Path $escapeRoot 'D365_file_csv_import\config\.env'
+    [IO.File]::WriteAllText($escapePath, ((Get-Content -LiteralPath $escapePath -Raw) -replace 'DB_NAME=D365_finance', 'DB_NAME="D365_finance\""'), [Text.UTF8Encoding]::new($false))
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $escapeRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'DB_NAME'
+
+    $caseReleaseRoot = New-TestEnvironment -Name case-release -Release Release-A
+    $caseReleasePath = Join-Path $caseReleaseRoot 'finance_report\config\.env'
+    [IO.File]::WriteAllText($caseReleasePath, ((Get-Content -LiteralPath $caseReleasePath -Raw) -replace 'APP_RELEASE=Release-A', 'APP_RELEASE=release-a'), [Text.UTF8Encoding]::new($false))
+    $caseReleaseSnapshots = Get-EnvironmentSnapshots $caseReleaseRoot
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId 'Release-B' -EnvironmentRoot $caseReleaseRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE Release-B' } 'identical'
+    Assert-SnapshotsUnchanged $caseReleaseSnapshots
+
+    $commentRoot = New-TestEnvironment -Name quoted-comments
+    foreach ($project in @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')) {
+        $commentPath = Join-Path $commentRoot "$project\config\.env"
+        $commentText = Get-Content -LiteralPath $commentPath -Raw
+        $commentText = $commentText -replace 'APP_ENV=UAT', 'APP_ENV="UAT" # environment'
+        $commentText = $commentText -replace 'APP_RELEASE=2026-07-31.8', "APP_RELEASE='2026-07-31.8' # release"
+        $commentText = $commentText -replace 'DB_NAME=D365_finance', 'DB_NAME=D365_finance # database'
+        [IO.File]::WriteAllText($commentPath, $commentText, [Text.UTF8Encoding]::new($false))
+    }
+    $commentResult = (& $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $commentRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' | Out-String | ConvertFrom-Json)
+    if ($commentResult.status -cne 'UPDATED') { throw 'Valid paired quotes and outside comments were rejected.' }
+    $commentAfter = Get-Content -LiteralPath (Join-Path $commentRoot 'finance_report\config\.env') -Raw
+    if ($commentAfter -notmatch "APP_RELEASE='2026-07-31\.9' # release" -or $commentAfter -notmatch 'APP_ENV="UAT" # environment') { throw 'Quoted release update did not preserve quotes/comments.' }
+
+    $lowerEnvRoot = New-TestEnvironment -Name lowercase-env -AppEnv uat
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $lowerEnvRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'APP_ENV'
+
+    $bomRoot = New-TestEnvironment -Name utf8-bom
+    $bomPath = Join-Path $bomRoot 'finance_report\config\.env'
+    $bomBody = [IO.File]::ReadAllBytes($bomPath)
+    $bomBytes = [byte[]](0xEF, 0xBB, 0xBF) + $bomBody
+    [IO.File]::WriteAllBytes($bomPath, $bomBytes)
+    & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $bomRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' | Out-Null
+    $bomAfter = [IO.File]::ReadAllBytes($bomPath)
+    if ($bomAfter[0] -ne 0xEF -or $bomAfter[1] -ne 0xBB -or $bomAfter[2] -ne 0xBF) { throw 'UTF-8 BOM was not preserved.' }
+
+    $invalidUtf8Root = New-TestEnvironment -Name invalid-utf8
+    $invalidUtf8Path = Join-Path $invalidUtf8Root 'finance_report\config\.env'
+    $validBytes = [IO.File]::ReadAllBytes($invalidUtf8Path)
+    [IO.File]::WriteAllBytes($invalidUtf8Path, ($validBytes + [byte[]](0xC3, 0x28)))
+    $invalidSnapshots = Get-EnvironmentSnapshots $invalidUtf8Root
+    $invalidAuditCount = @(Get-ChildItem -LiteralPath $auditRoot -Filter '*.json').Count
+    Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $invalidUtf8Root -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'UPDATE UAT APP_RELEASE 2026-07-31.9' } 'UTF-8'
+    Assert-SnapshotsUnchanged $invalidSnapshots
+    if (@(Get-ChildItem -LiteralPath $auditRoot -Filter '*.json').Count -ne $invalidAuditCount) { throw 'Invalid UTF-8 created an audit file.' }
 
     $wrongTokenRoot = New-TestEnvironment -Name wrong-token
     Invoke-ExpectedFailure { & $scriptPath -Environment UAT -ReleaseId '2026-07-31.9' -EnvironmentRoot $wrongTokenRoot -AuditRoot $auditRoot -LocalTestMode -ApprovalToken 'wrong' } 'approval'
