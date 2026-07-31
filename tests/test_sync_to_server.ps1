@@ -15,8 +15,9 @@ try {
     Set-Content (Join-Path $sourceRoot 'modified.txt') 'source version'
     Set-Content (Join-Path $sourceRoot 'equal.txt') 'same content'
     Set-Content (Join-Path $sourceRoot 'hidden.txt') 'hidden source file'
-    Set-Content (Join-Path $sourceRoot '.gitignore') ".env`nlogs/"
+    Set-Content (Join-Path $sourceRoot '.gitignore') ".env`nlogs/`nignored-artifact.txt"
     Set-Content (Join-Path $sourceRoot '.env') 'DB_PASS=must-not-deploy'
+    Set-Content (Join-Path $sourceRoot 'ignored-artifact.txt') 'must-not-deploy'
     New-Item -ItemType Directory (Join-Path $sourceRoot 'logs') | Out-Null
     Set-Content (Join-Path $sourceRoot 'logs\ignored.log') 'excluded log'
 
@@ -54,6 +55,7 @@ try {
     Assert-True ($comparison -match '(?m)^Deleted:\s+removed\.txt\s*$') 'Deleted file was not listed.'
     Assert-True ($comparison -notmatch '(?m)equal\.txt') 'Equal file was listed.'
     Assert-True ($comparison -notmatch '(?m)\.env') 'Environment file was included.'
+    Assert-True ($comparison -notmatch 'ignored-artifact') 'Git-ignored artifact was included.'
 
     Set-Content (Join-Path $sourceRoot 'dirty.txt') 'not committed'
     try {

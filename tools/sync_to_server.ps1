@@ -116,8 +116,13 @@ if ($Environment -eq 'Production') {
 }
 
 $sourceFiles = @{}
-foreach ($file in Get-ChildItem -LiteralPath $source -File -Recurse -Force) {
-    $relative = $file.FullName.Substring($source.Length).TrimStart('\', '/')
+$trackedPaths = @(& git -C $source ls-files)
+if ($LASTEXITCODE -ne 0) {
+    throw 'Unable to list tracked release files.'
+}
+foreach ($trackedPath in $trackedPaths) {
+    $relative = $trackedPath.Replace('/', '\')
+    $file = Get-Item -LiteralPath (Join-Path $source $relative)
     if (-not (Test-ExcludedPath $relative $Exclude)) {
         $sourceFiles[$relative.ToLowerInvariant()] = $file
     }
