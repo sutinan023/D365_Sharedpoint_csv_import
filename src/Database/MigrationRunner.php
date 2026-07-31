@@ -40,8 +40,8 @@ final class MigrationRunner
 
         foreach ($files as $file) {
             $version = basename($file);
-            $checksum = hash_file('sha256', $file);
-            if ($checksum === false) {
+            $checksum = $this->checksum($file);
+            if ($checksum === null) {
                 throw new RuntimeException("Unable to hash migration: {$version}");
             }
 
@@ -125,6 +125,16 @@ final class MigrationRunner
         $statement->execute([$projectName, $version]);
         $row = $statement->fetch(PDO::FETCH_ASSOC);
         return $row === false ? null : $row;
+    }
+
+    private function checksum(string $file): ?string
+    {
+        $contents = file_get_contents($file);
+        if ($contents === false) {
+            return null;
+        }
+
+        return hash('sha256', str_replace(["\r\n", "\r"], "\n", $contents));
     }
 
     private function acquireLock(string $name): void
