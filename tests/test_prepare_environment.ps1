@@ -9,4 +9,7 @@ if ($plan.directories -notcontains 'C:\xampp\htdocs\uat\D365_file_csv_import\imp
 if ($plan.directories -notcontains 'C:\xampp\statement_storage\uat\statement_imports') {
     throw 'UAT statement storage is missing.'
 }
+if ($plan.env_files -notcontains 'C:\xampp\htdocs\uat\D365_Sharedpoint_csv_import\config\.env') {
+    throw 'SharePoint environment file path is incorrect.'
+}
 Write-Host 'Environment preparation plan checks passed.'

@@ -19,11 +19,20 @@ $directories = [Collections.Generic.List[string]]::new()
 foreach ($project in $projects) {
     $projectRoot = Join-Path $environmentRoot $project
     $directories.Add($projectRoot)
+    if ($project -eq 'D365_Sharedpoint_csv_import') {
+        $directories.Add((Join-Path $projectRoot 'config'))
+    }
     foreach ($runtime in @('import', 'download', 'archive', 'processed', 'error', 'logs', 'temp')) {
         $directories.Add((Join-Path $projectRoot $runtime))
     }
 }
 $directories.Add("C:\xampp\statement_storage\$segment\statement_imports")
+
+$envFiles = @(
+    (Join-Path $environmentRoot 'D365_Sharedpoint_csv_import\config\.env'),
+    (Join-Path $environmentRoot 'D365_file_csv_import\.env'),
+    (Join-Path $environmentRoot 'finance_report\.env')
+)
 
 $plan = [ordered]@{
     environment = $Environment
@@ -32,7 +41,7 @@ $plan = [ordered]@{
     scheduler_identity = $SchedulerIdentity
     admin_identity = $AdminIdentity
     directories = $directories
-    env_files = @($projects | ForEach-Object { Join-Path (Join-Path $environmentRoot $_) '.env' })
+    env_files = $envFiles
 }
 if ($PlanOnly) {
     $plan | ConvertTo-Json -Depth 4
