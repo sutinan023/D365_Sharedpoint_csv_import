@@ -6,12 +6,15 @@ use PDO;
 
 final class SchemaInventory
 {
+    private array $warnings = [];
+
     public function __construct(private readonly PDO $pdo)
     {
     }
 
     public function collect(string $schema): array
     {
+        $this->warnings = [];
         return [
             'schema' => $schema,
             'collected_at' => gmdate('c'),
@@ -58,17 +61,19 @@ final class SchemaInventory
                 . 'ORDER BY tc.TABLE_NAME, tc.CONSTRAINT_NAME, kcu.ORDINAL_POSITION',
                 $schema
             ),
-            'check_constraints' => $this->fetch(
+            'check_constraints' => $this->fetchOptional(
                 'SELECT cc.CONSTRAINT_NAME, cc.CHECK_CLAUSE '
                 . 'FROM information_schema.CHECK_CONSTRAINTS cc '
                 . 'WHERE cc.CONSTRAINT_SCHEMA = :schema ORDER BY cc.CONSTRAINT_NAME',
-                $schema
+                $schema,
+                'CHECK_CONSTRAINTS is not available on this database version'
             ),
             'events' => $this->fetch(
                 'SELECT EVENT_NAME, EVENT_DEFINITION, EVENT_TYPE, EXECUTE_AT, INTERVAL_VALUE, INTERVAL_FIELD, STATUS '
                 . 'FROM information_schema.EVENTS WHERE EVENT_SCHEMA = :schema ORDER BY EVENT_NAME',
                 $schema
             ),
+            'warnings' => $this->warnings,
         ];
     }
 
@@ -77,5 +82,23 @@ final class SchemaInventory
         $statement = $this->pdo->prepare($sql);
         $statement->execute(['schema' => $schema]);
         return $statement->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    private function fetchOptional(string $sql, string $schema, string $warning): array
+    {
+        try {
+            return $this->fetch($sql, $schema);
+        } catch (\PDOException $exception) {
+            $message = strtolower($exception->getMessage());
+            if (
+                $exception->getCode() !== '42S02'
+                && !str_contains($message, 'unknown table')
+                && !str_contains($message, 'no such table')
+            ) {
+                throw $exception;
+            }
+            $this->warnings[] = $warning;
+            return [];
+        }
     }
 }

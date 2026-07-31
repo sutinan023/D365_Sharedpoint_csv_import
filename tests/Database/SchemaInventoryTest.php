@@ -39,5 +39,10 @@ return [
         assert($inventory['constraints'][0]['CONSTRAINT_NAME'] === 'PRIMARY');
         assert($inventory['check_constraints'][0]['CONSTRAINT_NAME'] === 'positive_id');
         assert($inventory['events'][0]['EVENT_NAME'] === 'daily_refresh');
+
+        $pdo->exec('DROP TABLE information_schema.CHECK_CONSTRAINTS');
+        $legacyInventory = (new SchemaInventory($pdo))->collect('D365_finance');
+        assert($legacyInventory['check_constraints'] === []);
+        assert(count($legacyInventory['warnings']) === 1);
     },
 ];
