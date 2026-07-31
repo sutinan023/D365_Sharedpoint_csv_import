@@ -12,5 +12,9 @@ if ($plan.retention_days -ne 30 -or $plan.requires_restore_rehearsal -ne $true) 
 if ($plan.backup_file -notmatch 'D365_finance_prod.*2026-07-31.1.*\.sql$') {
     throw 'Backup file does not identify database and release'
 }
+$scriptSource = Get-Content -LiteralPath $scriptPath -Raw
+if ($scriptSource -notmatch 'BACKUP_DB_USER' -or $scriptSource -notmatch 'BACKUP_DB_PASS') {
+    throw 'Database checkpoint does not use the dedicated backup account'
+}
 
 Write-Host 'Database checkpoint plan checks passed.'

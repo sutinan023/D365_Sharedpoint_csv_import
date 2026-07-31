@@ -61,7 +61,7 @@ foreach ($line in Get-Content -LiteralPath $envPath) {
 if ($values.APP_ENV.ToUpperInvariant() -cne $environmentLabel -or $values.DB_NAME -cne $database) {
     throw 'Environment guard rejected the database checkpoint configuration.'
 }
-foreach ($key in @('DB_HOST', 'DB_NAME', 'DB_USER', 'DB_PASS')) {
+foreach ($key in @('DB_HOST', 'DB_NAME', 'BACKUP_DB_USER', 'BACKUP_DB_PASS')) {
     if ([string]::IsNullOrWhiteSpace($values[$key])) {
         throw "$key is required for backup."
     }
@@ -75,10 +75,10 @@ if (-not (Test-Path -LiteralPath $dumpExecutable)) {
 New-Item -ItemType Directory -Path $environmentBackupRoot -Force | Out-Null
 $previousPassword = $env:MYSQL_PWD
 try {
-    $env:MYSQL_PWD = $values.DB_PASS
+    $env:MYSQL_PWD = $values.BACKUP_DB_PASS
     $process = Start-Process -FilePath $dumpExecutable -Wait -PassThru -NoNewWindow -ArgumentList @(
         "--host=$($values.DB_HOST)",
-        "--user=$($values.DB_USER)",
+        "--user=$($values.BACKUP_DB_USER)",
         '--single-transaction',
         '--routines',
         '--triggers',
