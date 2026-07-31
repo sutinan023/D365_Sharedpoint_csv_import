@@ -23,6 +23,15 @@ try {
         }
     }
 
+    $customManifest = (& $scriptPath -ReleaseId 'custom-roots' `
+        -SharePointRoot (Join-Path $testRoot 'D365_Sharedpoint_csv_import') `
+        -FileImporterRoot (Join-Path $testRoot 'D365_file_csv_import') `
+        -FinanceReportRoot (Join-Path $testRoot 'finance_report') -PlanOnly |
+        Out-String | ConvertFrom-Json)
+    if ($customManifest.release_id -cne 'custom-roots') {
+        throw 'Custom project roots were not accepted.'
+    }
+
     Set-Content (Join-Path $testRoot 'finance_report\dirty.txt') 'dirty'
     try {
         & $scriptPath -ReleaseId 'dirty' -SourceParent $testRoot -PlanOnly | Out-Null

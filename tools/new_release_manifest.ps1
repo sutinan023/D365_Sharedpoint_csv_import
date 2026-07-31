@@ -4,15 +4,23 @@ param(
     [string] $ReleaseId,
 
     [string] $SourceParent = 'C:\xampp\htdocs',
+    [string] $SharePointRoot,
+    [string] $FileImporterRoot,
+    [string] $FinanceReportRoot,
     [string] $OutputPath,
     [switch] $PlanOnly
 )
 
 $ErrorActionPreference = 'Stop'
 $projectNames = @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_report')
+$projectRoots = @{
+    D365_Sharedpoint_csv_import = if ($SharePointRoot) { $SharePointRoot } else { Join-Path $SourceParent 'D365_Sharedpoint_csv_import' }
+    D365_file_csv_import = if ($FileImporterRoot) { $FileImporterRoot } else { Join-Path $SourceParent 'D365_file_csv_import' }
+    finance_report = if ($FinanceReportRoot) { $FinanceReportRoot } else { Join-Path $SourceParent 'finance_report' }
+}
 $projects = [ordered]@{}
 foreach ($projectName in $projectNames) {
-    $projectRoot = Join-Path $SourceParent $projectName
+    $projectRoot = $projectRoots[$projectName]
     $dirty = (& git -C $projectRoot status --porcelain --untracked-files=all | Out-String).Trim()
     if ($LASTEXITCODE -ne 0) {
         throw "Unable to inspect Git status for $projectName"
