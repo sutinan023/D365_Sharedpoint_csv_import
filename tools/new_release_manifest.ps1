@@ -43,7 +43,8 @@ $manifest = [ordered]@{
         D365_Sharedpoint_csv_import = @(
             '000_create_schema_migrations.sql',
             '001_create_sharepoint_file_queue.sql',
-            '002_add_pending_archive_to_import_files_status.sql'
+            '002_add_pending_archive_to_import_files_status.sql',
+            '003_add_effective_date_to_stg_received_outbound.sql'
         )
         D365_file_csv_import = @()
         finance_report = @()
