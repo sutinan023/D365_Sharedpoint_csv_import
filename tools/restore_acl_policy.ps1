@@ -15,3 +15,8 @@ function Assert-RestoreAclEvidence {
         if (([int64]$ace.rights_value -band $writeLikeMask) -ne 0 -and $sid -notin $AllowedWriterSids) { throw "ACL grants write-like rights to an unapproved SID: $sid" }
     }
 }
+
+function Assert-RestoreApproverToken {
+    param([Parameter(Mandatory = $true)][string]$UserSid,[Parameter(Mandatory = $true)][string[]]$GroupSids)
+    if ($UserSid -notmatch '^S-1-(?:[0-9]+-)+[0-9]+$' -or 'S-1-5-32-544' -notin $GroupSids) { throw 'Restore approval requires a verified Builtin Administrators token.' }
+}

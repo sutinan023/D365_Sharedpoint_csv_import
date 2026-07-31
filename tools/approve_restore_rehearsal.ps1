@@ -4,7 +4,8 @@ param(
     [Parameter(Mandatory = $true)] [string] $RestoreEvidencePath,
     [Parameter(Mandatory = $true)] [string] $OutputPath,
     [string] $ApprovalToken,
-    [switch] $LocalTestMode
+    [switch] $LocalTestMode,
+    [string[]] $LocalTestApproverGroupSids
 )
 
 $ErrorActionPreference = 'Stop'
@@ -57,7 +58,8 @@ function Assert-InsideRoot([string] $Path, [string] $Root, [switch] $AllowMissin
 }
 function Assert-ProtectedAcl([string] $Path, [string[]] $AllowedWriterSids) {
     $helper = Join-Path $PSScriptRoot 'get_file_acl_evidence.ps1'
-    $output = & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helper -Path $Path
+    $powerShellExe = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe'
+    $output = & $powerShellExe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $helper -Path $Path
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace(($output -join "`n"))) { throw 'ACL evidence helper failed closed.' }
     $evidence = ConvertFrom-StrictJsonText ($output -join "`n") 'ACL evidence'
     Assert-RestoreAclEvidence -Evidence $evidence -AllowedWriterSids $AllowedWriterSids
@@ -105,7 +107,11 @@ function Assert-ExactKeys($Object,[string[]]$Expected,[string]$Label) { $actual=
 
 $approverSid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($approverSid -notmatch '^S-1-(?:[0-9]+-)+[0-9]+$') { throw 'Current approver SID could not be determined.' }
-$allowedWriterSids = @('S-1-5-18','S-1-5-32-544',$approverSid)
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+if ($LocalTestApproverGroupSids -and -not $LocalTestMode) { throw 'LocalTestApproverGroupSids is forbidden outside LocalTestMode.' }
+$approverGroups = if ($LocalTestMode -and $LocalTestApproverGroupSids) { $LocalTestApproverGroupSids } else { @($identity.Groups | ForEach-Object { $_.Value }) }
+Assert-RestoreApproverToken -UserSid $approverSid -GroupSids $approverGroups
+$allowedWriterSids = @('S-1-5-18','S-1-5-32-544')
 $manifestFull=Get-FullPath $BackupManifestPath
 if ($LocalTestMode) { $temp=Get-FullPath ([IO.Path]::GetTempPath()); $trustedRoot=Get-FullPath (Split-Path -Parent $manifestFull); if ($trustedRoot -ieq $temp -or -not $trustedRoot.StartsWith($temp+'\',[StringComparison]::OrdinalIgnoreCase)) { throw 'LocalTestMode artifacts must use a dedicated directory under system temp.' } }
 else { $candidates=@('C:\xampp\backups\d365\uat','C:\xampp\backups\d365\prod','\\100.1.1.166\c$\xampp\backups\d365\uat','\\100.1.1.166\c$\xampp\backups\d365\prod');$trustedRoot=$null;foreach($candidate in $candidates){$root=Get-FullPath $candidate;if($manifestFull.StartsWith($root+'\',[StringComparison]::OrdinalIgnoreCase)){$trustedRoot=$root;break}};if(-not$trustedRoot){throw 'Backup manifest is outside approved D365 backup roots.'} }

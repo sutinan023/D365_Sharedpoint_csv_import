@@ -88,8 +88,9 @@ return [
         throw new RuntimeException('Expected artifact outside injected root to be rejected');
     },
     'backup checkpoint ACL policy permits only approved SID writers and owner' => function (): void {
-        BackupCheckpointValidator::validateAclEvidence(['owner_sid' => 'S-1-5-18', 'allow_aces' => [['sid' => 'S-1-5-32-544', 'rights_value' => 2, 'is_inherited' => true]]], 'S-1-5-21-1-2-3-1001');
-        foreach ([['owner_sid' => 'S-1-5-21-9', 'allow_aces' => []], ['owner_sid' => 'S-1-5-18', 'allow_aces' => [['sid' => 'S-1-5-21-9', 'rights_value' => 2, 'is_inherited' => false]]]] as $bad) { try { BackupCheckpointValidator::validateAclEvidence($bad, 'S-1-5-21-1-2-3-1001'); } catch (RuntimeException) { continue; } throw new RuntimeException('Expected unapproved ACL identity to be rejected'); }
+        $source = (string)file_get_contents(__DIR__ . '/../../src/Database/BackupCheckpointValidator.php'); assert(str_contains($source, "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe")); assert(!str_contains($source, "['powershell.exe'"));
+        BackupCheckpointValidator::validateAclEvidenceForTest(['owner_sid' => 'S-1-5-18', 'allow_aces' => [['sid' => 'S-1-5-32-544', 'rights_value' => 2, 'is_inherited' => true]]]);
+        foreach ([['owner_sid' => 'S-1-5-21-1-2-3-1001', 'allow_aces' => [['sid' => 'S-1-5-21-1-2-3-1001', 'rights_value' => 2, 'is_inherited' => false]]], ['owner_sid' => 'S-1-5-18', 'allow_aces' => [['sid' => 'S-1-5-21-9', 'rights_value' => 2, 'is_inherited' => false]]]] as $bad) { try { BackupCheckpointValidator::validateAclEvidenceForTest($bad); } catch (RuntimeException) { continue; } throw new RuntimeException('Expected forged approved_by_sid ACL identity to be rejected'); }
     },
     'backup checkpoint validator rejects sanitizer rehearsal mismatch' => function (): void {
         foreach (['missing', 'D365_finance_rehearsal_cross'] as $badValue) {

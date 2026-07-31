@@ -59,7 +59,7 @@ final class BackupCheckpointValidator
         $auditPath = self::trustedFile(self::stringField($receipt, 'sanitizer_audit_path', 'receipt'), $root);
         $sanitizedPath = self::trustedFile(self::stringField($receipt, 'sanitized_path', 'receipt'), $root);
         $evidencePath = self::trustedFile(self::stringField($receipt, 'evidence_path', 'receipt'), $root);
-        if ($localTestRoot === null) { self::assertProtectedAcl([$root, $manifestPath, $receiptPath, $backupPath, $auditPath, $sanitizedPath, $evidencePath], $approverSid); }
+        if ($localTestRoot === null) { self::assertProtectedAcl([$root, $manifestPath, $receiptPath, $backupPath, $auditPath, $sanitizedPath, $evidencePath]); }
         $audit = self::readJsonSnapshot($auditPath, 'sanitizer audit');
         $sanitized = self::readArtifactSnapshot($sanitizedPath, 'sanitized backup');
         $evidence = self::readJsonSnapshot($evidencePath, 'restore evidence');
@@ -101,10 +101,15 @@ final class BackupCheckpointValidator
         return $manifest;
     }
 
-    public static function validateAclEvidence(array $evidence, string $approverSid): void
+    public static function validateAclEvidenceForTest(array $evidence, ?array $testOnlyAllowedWriterSids = null): void
     {
-        if (preg_match('/^S-1-(?:[0-9]+-)+[0-9]+$/', $approverSid) !== 1) { throw new RuntimeException('Approver SID is invalid.'); }
-        $allowed = [self::SYSTEM_SID => true, self::ADMINISTRATORS_SID => true, $approverSid => true];
+        self::validateAclEvidence($evidence, $testOnlyAllowedWriterSids);
+    }
+
+    private static function validateAclEvidence(array $evidence, ?array $testOnlyAllowedWriterSids = null): void
+    {
+        $allowed = [self::SYSTEM_SID => true, self::ADMINISTRATORS_SID => true];
+        if ($testOnlyAllowedWriterSids !== null) { foreach ($testOnlyAllowedWriterSids as $sid) { if (!is_string($sid) || preg_match('/^S-1-(?:[0-9]+-)+[0-9]+$/', $sid) !== 1) { throw new RuntimeException('Test-only ACL SID is invalid.'); } $allowed[$sid] = true; } }
         $owner = $evidence['owner_sid'] ?? null;
         if (!is_string($owner) || preg_match('/^S-1-(?:[0-9]+-)+[0-9]+$/', $owner) !== 1 || !isset($allowed[$owner])) {
             throw new RuntimeException('ACL owner SID is missing or not explicitly allowed.');
@@ -256,13 +261,13 @@ final class BackupCheckpointValidator
         self::nativeNonNegative($proof['live_schema_reference_count'] ?? null, 'live schema reference count'); if ($proof['live_schema_reference_count'] !== 0 || trim((string)($proof['verified_at'] ?? '')) === '' || trim((string)($proof['verified_by'] ?? '')) === '') { throw new RuntimeException('Restore evidence verification metadata is invalid.'); }
     }
 
-    private static function assertProtectedAcl(array $paths, string $approverSid): void
+    private static function assertProtectedAcl(array $paths): void
     {
         if (PHP_OS_FAMILY !== 'Windows' || !function_exists('proc_open')) { throw new RuntimeException('Trusted-root ACL validation is unavailable.'); }
         $helper = dirname(__DIR__, 2) . '/tools/get_file_acl_evidence.ps1';
         if (!is_file($helper)) { throw new RuntimeException('Trusted-root ACL helper is unavailable.'); }
         foreach (array_unique($paths) as $path) {
-            $command = ['powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-Path', $path];
+            $command = ['C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $helper, '-Path', $path];
             $descriptors = [1 => ['pipe', 'w'], 2 => ['pipe', 'w']];
             $process = proc_open($command, $descriptors, $pipes, null, null, ['bypass_shell' => true]);
             if (!is_resource($process)) { throw new RuntimeException('Trusted-root ACL helper could not start.'); }
@@ -271,7 +276,7 @@ final class BackupCheckpointValidator
             self::rejectDuplicateKeys($stdout, 'ACL evidence');
             try { $evidence = json_decode($stdout, true, 32, JSON_THROW_ON_ERROR); } catch (JsonException $exception) { throw new RuntimeException('Trusted-root ACL helper returned invalid JSON.', 0, $exception); }
             if (!is_array($evidence)) { throw new RuntimeException('Trusted-root ACL helper returned invalid evidence.'); }
-            self::validateAclEvidence($evidence, $approverSid);
+            self::validateAclEvidence($evidence);
         }
     }
 }
