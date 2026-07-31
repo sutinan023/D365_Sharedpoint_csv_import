@@ -16,5 +16,8 @@ $scriptSource = Get-Content -LiteralPath $scriptPath -Raw
 if ($scriptSource -notmatch 'BACKUP_DB_USER' -or $scriptSource -notmatch 'BACKUP_DB_PASS') {
     throw 'Database checkpoint does not use the dedicated backup account'
 }
+if ($scriptSource -notmatch '\.ProviderPath') {
+    throw 'Database checkpoint does not store a PHP-compatible filesystem path'
+}
 
 Write-Host 'Database checkpoint plan checks passed.'

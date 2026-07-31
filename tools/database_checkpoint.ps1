@@ -102,7 +102,7 @@ if (-not (Test-Path -LiteralPath $backupFile) -or (Get-Item -LiteralPath $backup
     database = $database
     release_id = $ReleaseId
     created_at = (Get-Date).ToString('o')
-    backup_file = (Resolve-Path -LiteralPath $backupFile).Path
+    backup_file = (Resolve-Path -LiteralPath $backupFile).ProviderPath
     sha256 = (Get-FileHash -LiteralPath $backupFile -Algorithm SHA256).Hash
     size_bytes = (Get-Item -LiteralPath $backupFile).Length
     restore_receipt_file = "$backupFile.restore-approved.json"
