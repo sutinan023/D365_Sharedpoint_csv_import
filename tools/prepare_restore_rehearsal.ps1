@@ -100,7 +100,7 @@ try {
 if ($sourceText -match '(?i)\bCREATE\s+DATABASE\b|\bUSE\s+(?:`[^`]+`|[A-Za-z0-9_]+)\b') {
     throw 'Source dump contains CREATE DATABASE or USE statements and cannot be isolated safely.'
 }
-if ($sourceText -match '(?is)\bCREATE\b[^;]{0,1000}\b(?:TRIGGER|PROCEDURE|FUNCTION|EVENT)\b') {
+if ($sourceText -match '(?is)\b(?:CREATE|DROP|ALTER)\b[^;]{0,1000}\b(?:TRIGGER|PROCEDURE|FUNCTION|EVENT)\b') {
     throw 'Source dump contains an executable database object and cannot be isolated safely.'
 }
 
@@ -108,7 +108,7 @@ $definerPattern = '(?is)\bDEFINER\s*=\s*`[^`]+`\s*@\s*`[^`]+`\s+SQL\s+SECURITY\s
 $sourceQualifierPattern = '`' + [regex]::Escape($SourceDatabase) + '`\.'
 $viewBlockPattern = '(?is)/\*!\d{5}\s+CREATE\s+ALGORITHM\b.*?\bVIEW\b.*?\*/;'
 $viewBlocks = [regex]::Matches($sourceText, $viewBlockPattern)
-$sqlStringPattern = "(?s)'(?:''|\\.|[^'\\])*'"
+$sqlStringPattern = '(?s)''(?:''''|\\.|[^''\\])*''|"(?:""|\\.|[^"\\])*"'
 $sqlStrings = [regex]::Matches($sourceText, $sqlStringPattern)
 function Test-MatchInsideRanges {
     param([Text.RegularExpressions.Match] $Match, [System.Collections.IEnumerable] $Ranges)
@@ -119,6 +119,33 @@ function Test-MatchInsideRanges {
         }
     }
     return $false
+}
+
+function Convert-ViewBlock {
+    param(
+        [string] $Block,
+        [string] $DefinerPattern,
+        [string] $QualifierPattern,
+        [string] $ReplacementDatabase,
+        [string] $StringPattern
+    )
+
+    $strings = [regex]::Matches($Block, $StringPattern)
+    $builder = New-Object Text.StringBuilder
+    $cursor = 0
+    foreach ($stringMatch in $strings) {
+        $nonStringSegment = $Block.Substring($cursor, $stringMatch.Index - $cursor)
+        $nonStringSegment = [regex]::Replace($nonStringSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
+        $nonStringSegment = [regex]::Replace($nonStringSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'))
+        [void] $builder.Append($nonStringSegment)
+        [void] $builder.Append($stringMatch.Value)
+        $cursor = $stringMatch.Index + $stringMatch.Length
+    }
+    $remainingSegment = $Block.Substring($cursor)
+    $remainingSegment = [regex]::Replace($remainingSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
+    $remainingSegment = [regex]::Replace($remainingSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'))
+    [void] $builder.Append($remainingSegment)
+    return $builder.ToString()
 }
 $allDefiners = @([regex]::Matches($sourceText, $definerPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sqlStrings) })
 $allQualifiedReferences = @([regex]::Matches($sourceText, $sourceQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sqlStrings) })
@@ -140,8 +167,8 @@ $textBuilder = New-Object Text.StringBuilder
 $cursor = 0
 foreach ($viewBlock in $viewBlocks) {
     [void] $textBuilder.Append($sourceText.Substring($cursor, $viewBlock.Index - $cursor))
-    $sanitizedBlock = [regex]::Replace($viewBlock.Value, $definerPattern, 'SQL SECURITY INVOKER')
-    $sanitizedBlock = [regex]::Replace($sanitizedBlock, $sourceQualifierPattern, ('`' + $RehearsalDatabase + '`.'))
+    $sanitizedBlock = Convert-ViewBlock -Block $viewBlock.Value -DefinerPattern $definerPattern `
+        -QualifierPattern $sourceQualifierPattern -ReplacementDatabase $RehearsalDatabase -StringPattern $sqlStringPattern
     [void] $textBuilder.Append($sanitizedBlock)
     $cursor = $viewBlock.Index + $viewBlock.Length
 }

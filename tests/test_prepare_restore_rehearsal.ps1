@@ -74,11 +74,30 @@ try {
         throw 'Sanitizer changed table data outside a view DDL block.'
     }
 
+    $viewLiteralSourcePath = Join-Path $testRoot 'view-literal-source.sql'
+    $viewLiteralOutputPath = Join-Path $testRoot 'view-literal-sanitized.sql'
+    $viewLiteral = "'``D365_finance``.``do_not_rewrite``'"
+    $viewLiteralDump = (Get-TestDump -DatabaseName 'D365_finance').Replace(
+        'SELECT 1 AS n FROM `D365_finance`.`table1`',
+        "SELECT $viewLiteral AS literal_value FROM ``D365_finance``.``table1``"
+    )
+    [IO.File]::WriteAllText($viewLiteralSourcePath, $viewLiteralDump, (New-Object Text.UTF8Encoding($false)))
+    $viewLiteralHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $viewLiteralSourcePath).Hash.ToLowerInvariant()
+    & $scriptPath -BackupPath $viewLiteralSourcePath -ExpectedSourceSha256 $viewLiteralHash `
+        -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260731_2130' `
+        -OutputPath $viewLiteralOutputPath -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 | Out-Null
+    $viewLiteralSanitized = [IO.File]::ReadAllText($viewLiteralOutputPath)
+    if ($viewLiteralSanitized -notmatch [regex]::Escape($viewLiteral)) { throw 'Sanitizer changed a quoted VIEW string literal.' }
+    if ($viewLiteralSanitized -notmatch 'FROM `D365_finance_rehearsal_20260731_2130`\.`table1`') { throw 'Sanitizer did not transform the real VIEW reference.' }
+
     foreach ($objectSql in @(
         'CREATE TRIGGER `t` BEFORE INSERT ON `x` FOR EACH ROW SET @x = 1;',
         '/*!50003 CREATE*/ /*!50020 PROCEDURE `p`() SELECT 1 */;',
         'CREATE FUNCTION `f`() RETURNS INT RETURN 1;',
-        '/*!50106 CREATE*/ /*!50117 EVENT `e` ON SCHEDULE EVERY 1 DAY DO SELECT 1 */;'
+        '/*!50106 CREATE*/ /*!50117 EVENT `e` ON SCHEDULE EVERY 1 DAY DO SELECT 1 */;',
+        '/*!50003 DROP*/ /*!50032 TRIGGER `t` */;',
+        'ALTER PROCEDURE `p` COMMENT ''unsafe'';',
+        '/*!50106 ALTER*/ /*!50117 EVENT `e` ON SCHEDULE EVERY 1 DAY */;'
     )) {
         $objectSourcePath = Join-Path $testRoot ('object-{0}.sql' -f [guid]::NewGuid())
         [IO.File]::WriteAllText($objectSourcePath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$objectSql`n"), (New-Object Text.UTF8Encoding($false)))
