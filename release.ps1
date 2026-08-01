@@ -10,6 +10,12 @@ param(
     [string] $ProductionRoot = '\\100.1.1.166\htdocs\prod',
     [string] $ReleaseRoot = 'C:\xampp\backups\d365\releases',
     [string] $ApprovalToken,
+    [string] $UatAcceptanceToken,
+    [string] $ProductionApprovalToken,
+    [string] $ApprovalAuditRoot = 'C:\xampp\backups\d365\release-approvals',
+    [string] $UatApprovalPath,
+    [ValidatePattern('^[0-9a-fA-F]{64}$')][string] $ExpectedUatApprovalSha256,
+    [string] $PhpPath = 'C:\xampp\php\php.exe',
     [switch] $PlanOnly,
     [switch] $LocalTestMode
 )
@@ -153,6 +159,154 @@ function Invoke-Compare {
     Invoke-EnvironmentComparison -Environment 'PRODUCTION' -EnvironmentRoot $ProductionRoot -Manifest $release.Manifest
 }
 
+function Get-CurrentEnvironmentMetadata {
+    param(
+        [Parameter(Mandatory = $true)][string] $EnvironmentRoot,
+        [Parameter(Mandatory = $true)][string] $ExpectedEnvironment
+    )
+    $result = [ordered]@{}
+    foreach ($project in $script:D365ProjectNames) {
+        $path = Join-Path $EnvironmentRoot "$project\.deployment\current-release.json"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "Release metadata is missing for $ExpectedEnvironment $project"
+        }
+        $value = (Read-D365StrictJsonSnapshot -Path $path -Label "$ExpectedEnvironment metadata for $project").Value
+        if ([string] $value.project -cne $project -or [string] $value.environment -cne $ExpectedEnvironment) {
+            throw "Release metadata environment or project mismatch: $project"
+        }
+        if ([string] $value.git_sha -notmatch '^[0-9a-f]{40}$') {
+            throw "Release metadata SHA is invalid: $project"
+        }
+        $result[$project] = $value
+    }
+    return $result
+}
+
+function Invoke-ProductionPostDeployChecks {
+    param([Parameter(Mandatory = $true)][object] $Manifest)
+    if (-not (Test-Path -LiteralPath $PhpPath -PathType Leaf)) {
+        throw "PHP executable not found: $PhpPath"
+    }
+    foreach ($project in $script:D365ProjectNames) {
+        $checkScript = Join-Path $ProductionRoot "$project\tools\check_config.php"
+        if (-not (Test-Path -LiteralPath $checkScript -PathType Leaf)) {
+            throw "Production config check script not found: $project"
+        }
+        $raw = (& $PhpPath $checkScript | Out-String).Trim()
+        if ($LASTEXITCODE -ne 0) { throw "Production config check failed: $project" }
+        try { $config = $raw | ConvertFrom-Json } catch { throw "Production config check returned invalid JSON: $project" }
+        if ([string] $config.status -cne 'OK' -or [string] $config.app_env -cne 'PRODUCTION' -or
+            [string] $config.db_name -cne 'D365_finance_prod' -or
+            [string] $config.app_release -cne [string] $Manifest.release_id) {
+            throw "Production config guard result is invalid: $project"
+        }
+        $response = Invoke-WebRequest -Uri ([string] $config.app_base_url) -UseBasicParsing -MaximumRedirection 5 -TimeoutSec 20
+        if ([int] $response.StatusCode -lt 200 -or [int] $response.StatusCode -ge 400) {
+            throw "Production HTTP smoke check failed: $project"
+        }
+    }
+}
+
+function Invoke-PromoteProduction {
+    $release = Read-ReleaseManifest
+    Assert-LocalTestPath -Path $UatRoot -Label 'UAT root'
+    Assert-LocalTestPath -Path $ProductionRoot -Label 'Production root'
+    Assert-LocalTestPath -Path $ReleaseRoot -Label 'release root'
+    Assert-Directory -Path $UatRoot -Label 'UAT'
+    Assert-Directory -Path $ProductionRoot -Label 'Production'
+
+    $uatMetadata = Get-D365ReleaseMetadata -EnvironmentRoot $UatRoot -Manifest $release.Manifest
+    foreach ($value in $uatMetadata.Values) {
+        if ([string] $value.environment -cne 'UAT') { throw "UAT metadata environment mismatch: $($value.project)" }
+    }
+    $uatComparison = @(Invoke-EnvironmentComparison -Environment 'UAT' -EnvironmentRoot $UatRoot -Manifest $release.Manifest)
+    if ((@($uatComparison | Measure-Object -Property Total -Sum).Sum) -ne 0) {
+        throw 'UAT code drift detected. Production promotion requires UAT to match the attested Git release exactly.'
+    }
+
+    $productionMetadata = Get-CurrentEnvironmentMetadata -EnvironmentRoot $ProductionRoot -ExpectedEnvironment 'PRODUCTION'
+    $sourceProjects = Get-SourceProjects -EnvironmentRoot $ProductionRoot
+    $risks = [ordered]@{}
+    foreach ($project in $script:D365ProjectNames) {
+        $risks[$project] = Get-D365ReleaseRisk -RepositoryRoot $sourceProjects[$project].SourceRoot `
+            -FromSha ([string] $productionMetadata[$project].git_sha) `
+            -ToSha ([string] $release.Manifest.projects.$project.git_sha)
+    }
+    if (@($risks.Values | Where-Object Kind -ceq 'Operational').Count -gt 0) {
+        throw 'Operational release detected. Use the maintenance runbook instead of routine Production promotion.'
+    }
+    if (@($risks.Values | Where-Object Kind -ceq 'Migration').Count -gt 0) {
+        throw 'Migration release detected. Guarded migration coordination is required before Production promotion.'
+    }
+
+    $productionComparison = @(Invoke-EnvironmentComparison -Environment 'PRODUCTION' -EnvironmentRoot $ProductionRoot -Manifest $release.Manifest)
+    Write-Output "แผน Promote Production สำหรับ release $ReleaseId"
+    foreach ($result in $productionComparison) { Write-Output $result }
+    if ($PlanOnly) {
+        Write-Output 'PlanOnly: ผ่านด่าน UAT และเป็น code-only; ยังไม่มีการสร้าง receipt หรือคัดลอกไฟล์ Production'
+        return
+    }
+
+    if ($LocalTestMode) { Assert-LocalTestPath -Path $ApprovalAuditRoot -Label 'approval audit root' }
+
+    if ([string]::IsNullOrWhiteSpace($UatApprovalPath)) {
+        $expectedAcceptance = "APPROVE UAT RESULT $ReleaseId"
+        $actualAcceptance = $UatAcceptanceToken
+        if ([string]::IsNullOrWhiteSpace($actualAcceptance)) {
+            $actualAcceptance = Read-Host "พิมพ์ $expectedAcceptance หลังผู้ใช้รับรอง UAT"
+        }
+        Assert-D365Approval -Expected $expectedAcceptance -Actual $actualAcceptance
+        $UatApprovalPath = (& (Join-Path $toolRoot 'approve_uat_release.ps1') -ManifestPath $release.Path `
+            -AuditRoot $ApprovalAuditRoot -ApprovalToken $expectedAcceptance -LocalTestMode:$LocalTestMode | Out-String).Trim()
+        $ExpectedUatApprovalSha256 = (Get-FileHash -LiteralPath $UatApprovalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    } else {
+        if (-not (Test-Path -LiteralPath $UatApprovalPath -PathType Leaf)) { throw 'UAT approval receipt not found.' }
+        if ([string]::IsNullOrWhiteSpace($ExpectedUatApprovalSha256)) { throw 'Expected UAT approval receipt SHA-256 is required.' }
+        $actualReceiptHash = (Get-FileHash -LiteralPath $UatApprovalPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        if ($actualReceiptHash -cne $ExpectedUatApprovalSha256.ToLowerInvariant()) {
+            throw 'UAT approval receipt SHA-256 does not match the exact expected hash.'
+        }
+    }
+
+    foreach ($project in $script:D365ProjectNames) {
+        $entry = $sourceProjects[$project]
+        $validation = @{
+            Environment = 'Production'; ProjectName = $project; ReleaseId = $ReleaseId
+            ManifestPath = $release.Path; SourceRoot = $entry.SourceRoot; DestinationRoot = $entry.DestinationRoot
+            UatApprovalPath = $UatApprovalPath; ApprovalAuditRoot = $ApprovalAuditRoot
+            ExpectedUatApprovalSha256 = $ExpectedUatApprovalSha256; CompareOnly = $true
+            LocalTestMode = $LocalTestMode; ProductionApprovalValidationOnly = $LocalTestMode
+        }
+        & (Join-Path $toolRoot 'sync_to_server.ps1') @validation | Out-Null
+    }
+
+    $expectedProductionApproval = "APPROVE PRODUCTION $ReleaseId"
+    $actualProductionApproval = $ProductionApprovalToken
+    if ([string]::IsNullOrWhiteSpace($actualProductionApproval)) {
+        $actualProductionApproval = Read-Host "พิมพ์ $expectedProductionApproval เพื่อยืนยัน"
+    }
+    Assert-D365Approval -Expected $expectedProductionApproval -Actual $actualProductionApproval
+
+    if ($LocalTestMode) {
+        Write-Output 'LocalTestMode: Production gates passed; Production files were not changed.'
+        return
+    }
+    foreach ($project in $script:D365ProjectNames) {
+        $entry = $sourceProjects[$project]
+        & (Join-Path $toolRoot 'sync_to_server.ps1') -Environment Production -ProjectName $project `
+            -ReleaseId $ReleaseId -ManifestPath $release.Path -SourceRoot $entry.SourceRoot `
+            -DestinationRoot $entry.DestinationRoot -UatApprovalPath $UatApprovalPath `
+            -ApprovalAuditRoot $ApprovalAuditRoot -ExpectedUatApprovalSha256 $ExpectedUatApprovalSha256 `
+            -ApprovalToken $expectedProductionApproval
+    }
+    Invoke-ProductionPostDeployChecks -Manifest $release.Manifest
+    $postComparison = @(Invoke-EnvironmentComparison -Environment 'PRODUCTION' -EnvironmentRoot $ProductionRoot -Manifest $release.Manifest)
+    if ((@($postComparison | Measure-Object -Property Total -Sum).Sum) -ne 0) {
+        throw 'Production code differs from the attested Git release after deployment.'
+    }
+    [pscustomobject]@{ ReleaseId = $ReleaseId; Status = 'DEPLOYED'; PostDeployDifferenceCount = 0 }
+}
+
 if ($Action -ceq 'Menu') {
     Write-Host 'D365 Finance - เมนู Release/Deploy'
     Write-Host '1. สร้าง Release และ Deploy ไป UAT'
@@ -176,5 +330,5 @@ if ($Action -ceq 'Menu') {
 switch ($Action) {
     'DeployUAT' { Invoke-DeployUAT }
     'Compare' { Invoke-Compare }
-    'PromoteProduction' { throw 'Production promotion is not implemented yet.' }
+    'PromoteProduction' { Invoke-PromoteProduction }
 }

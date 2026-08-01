@@ -11,6 +11,27 @@ function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw $Message }
 }
 
+function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
+    try { & $Action; throw 'Expected failure.' } catch {
+        if ($_.Exception.Message -eq 'Expected failure.' -or $_.Exception.Message -notmatch $Pattern) { throw }
+    }
+}
+
+function Set-TightAcl([string] $Path) {
+    $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) { [void] $acl.RemoveAccessRuleSpecific($rule) }
+    $accessRule = New-Object Security.AccessControl.FileSystemAccessRule(
+        $sid, [Security.AccessControl.FileSystemRights]::FullControl,
+        [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit',
+        [Security.AccessControl.PropagationFlags]::None,
+        [Security.AccessControl.AccessControlType]::Allow)
+    [void] $acl.AddAccessRule($accessRule)
+    $acl.SetOwner($sid)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
+
 function New-TestRepository([string] $Path, [string] $Project) {
     New-Item -ItemType Directory -Path $Path -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $Path 'app.php') -Value "<?php echo '$Project';"
@@ -108,6 +129,83 @@ try {
         Assert-True ($result.Modified -eq 0) "Production Modified count mismatch: $($result.Project)"
         Assert-True ($result.Deleted -eq 0) "Production Deleted count mismatch: $($result.Project)"
     }
+
+    # Prepare a second, code-only release: UAT exactly matches it, while Production remains on the prior SHA.
+    $priorProjects = [ordered]@{}
+    foreach ($project in $projects) {
+        $priorProjects[$project] = [string] $manifestProjects[$project].git_sha
+        $source = Join-Path $sourceParent $project
+        Set-Content -LiteralPath (Join-Path $source 'app.php') -Value "<?php echo '$project release-2';"
+        & git -C $source add app.php
+        & git -C $source commit --quiet -m release-2
+        $manifestProjects[$project].git_sha = (& git -C $source rev-parse HEAD).Trim()
+
+        $uatDestination = Join-Path $uatRoot $project
+        Copy-Item -LiteralPath (Join-Path $source 'app.php') -Destination (Join-Path $uatDestination 'app.php') -Force
+        Remove-Item -LiteralPath (Join-Path $uatDestination 'deleted.php') -Force
+        $uatMetadataPath = Join-Path $uatDestination '.deployment\current-release.json'
+        [ordered]@{ release_id='2026-08-01.4'; environment='UAT'; project=$project; git_sha=[string]$manifestProjects[$project].git_sha } |
+            ConvertTo-Json | Set-Content -LiteralPath $uatMetadataPath -Encoding UTF8
+
+        $prodMetadataDirectory = Join-Path $productionRoot "$project\.deployment"
+        New-Item -ItemType Directory -Path $prodMetadataDirectory -Force | Out-Null
+        [ordered]@{ release_id='prior'; environment='PRODUCTION'; project=$project; git_sha=[string]$priorProjects[$project] } |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $prodMetadataDirectory 'current-release.json') -Encoding UTF8
+    }
+    $releaseId = '2026-08-01.4'
+    $releaseManifestPath = Join-Path $releaseRoot "$releaseId.json"
+    [ordered]@{ release_id=$releaseId; created_at=(Get-Date).ToString('o'); projects=$manifestProjects; migrations=[ordered]@{
+        D365_Sharedpoint_csv_import=@(); D365_file_csv_import=@(); finance_report=@()
+    }} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $releaseManifestPath -Encoding UTF8
+
+    $promotionBase = @{ Action='PromoteProduction'; ReleaseId=$releaseId; SourceParent=$sourceParent; UatRoot=$uatRoot
+        ProductionRoot=$productionRoot; ReleaseRoot=$releaseRoot; LocalTestMode=$true }
+    $promotionPlan = @(& $scriptPath @promotionBase -PlanOnly)
+    Assert-True (@($promotionPlan | Where-Object { $_ -is [string] -and $_ -match 'code-only' }).Count -eq 1) 'Successful code-only Production plan was not reported.'
+
+    $financeMetadataPath = Join-Path $uatRoot 'finance_report\.deployment\current-release.json'
+    $financeMetadata = Get-Content -LiteralPath $financeMetadataPath -Raw | ConvertFrom-Json
+    $financeMetadata.git_sha = '0' * 40
+    $financeMetadata | ConvertTo-Json | Set-Content -LiteralPath $financeMetadataPath -Encoding UTF8
+    Assert-Throws { & $scriptPath @promotionBase -PlanOnly | Out-Null } 'SHA'
+    $financeMetadata.git_sha = [string] $manifestProjects.finance_report.git_sha
+    $financeMetadata | ConvertTo-Json | Set-Content -LiteralPath $financeMetadataPath -Encoding UTF8
+
+    $uatFinanceApp = Join-Path $uatRoot 'finance_report\app.php'
+    Add-Content -LiteralPath $uatFinanceApp -Value 'drift'
+    Assert-Throws { & $scriptPath @promotionBase -PlanOnly | Out-Null } 'drift'
+    Copy-Item -LiteralPath (Join-Path $sourceParent 'finance_report\app.php') -Destination $uatFinanceApp -Force
+
+    $auditRoot = Join-Path $testRoot 'approval-audit'
+    New-Item -ItemType Directory -Path $auditRoot | Out-Null
+    Set-TightAcl $auditRoot
+    $beforeProductionFiles = @(Get-ChildItem -LiteralPath $productionRoot -File -Recurse -Force | ForEach-Object { $_.FullName })
+    Assert-Throws {
+        & $scriptPath @promotionBase -ApprovalAuditRoot $auditRoot -UatAcceptanceToken 'wrong' -ProductionApprovalToken "APPROVE PRODUCTION $releaseId" | Out-Null
+    } 'approval'
+    Assert-Throws {
+        & $scriptPath @promotionBase -ApprovalAuditRoot $auditRoot -UatApprovalPath (Join-Path $auditRoot 'missing.json') `
+            -ExpectedUatApprovalSha256 ('0' * 64) -ProductionApprovalToken "APPROVE PRODUCTION $releaseId" | Out-Null
+    } 'not found'
+
+    Assert-Throws {
+        & $scriptPath @promotionBase -ApprovalAuditRoot $auditRoot -UatAcceptanceToken "APPROVE UAT RESULT $releaseId" `
+            -ProductionApprovalToken 'wrong-production-approval' | Out-Null
+    } 'approval'
+    $manifestHash = (Get-FileHash -LiteralPath $releaseManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $receiptPath = Join-Path $auditRoot "uat-approval-$releaseId-$manifestHash.json"
+    Assert-True (Test-Path -LiteralPath $receiptPath -PathType Leaf) 'UAT acceptance receipt was not created.'
+    $receiptHash = (Get-FileHash -LiteralPath $receiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Throws {
+        & $scriptPath @promotionBase -ApprovalAuditRoot $auditRoot -UatApprovalPath $receiptPath `
+            -ExpectedUatApprovalSha256 ('0' * 64) -ProductionApprovalToken "APPROVE PRODUCTION $releaseId" | Out-Null
+    } 'SHA-256'
+
+    $success = @(& $scriptPath @promotionBase -ApprovalAuditRoot $auditRoot -UatApprovalPath $receiptPath `
+        -ExpectedUatApprovalSha256 $receiptHash -ProductionApprovalToken "APPROVE PRODUCTION $releaseId")
+    Assert-True (@($success | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) 'Local Production gate success was not reported.'
+    $afterProductionFiles = @(Get-ChildItem -LiteralPath $productionRoot -File -Recurse -Force | ForEach-Object { $_.FullName })
+    Assert-True (($beforeProductionFiles -join "`n") -ceq ($afterProductionFiles -join "`n")) 'A rejected or local Production plan changed Production files.'
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }
