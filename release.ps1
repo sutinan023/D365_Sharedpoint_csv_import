@@ -32,6 +32,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$interactiveMenu = $Action -ceq 'Menu'
 $toolRoot = Join-Path $PSScriptRoot 'tools'
 . (Join-Path $toolRoot 'release_common.ps1')
 . (Join-Path $toolRoot 'release_migration.ps1')
@@ -293,6 +294,12 @@ function Invoke-PromoteProduction {
     $migrationResult = $null
     if ($migrationProjects.Count -gt 0) {
         if ($null -eq $MigrationCommandAdapter) {
+            if ($interactiveMenu -and [string]::IsNullOrWhiteSpace($MigrationBackupManifestPath)) {
+                $MigrationBackupManifestPath = Read-Host 'ระบุ path ของ checkpoint manifest (.sql.json)'
+            }
+            if ($interactiveMenu -and [string]::IsNullOrWhiteSpace($MigrationRestoreReceiptPath)) {
+                $MigrationRestoreReceiptPath = Read-Host 'ระบุ path ของ restore-approved receipt (.json)'
+            }
             if ([string]::IsNullOrWhiteSpace($MigrationBackupManifestPath) -or [string]::IsNullOrWhiteSpace($MigrationRestoreReceiptPath)) {
                 throw 'Migration release requires -MigrationBackupManifestPath and -MigrationRestoreReceiptPath after the manual Restore rehearsal. No Production change was made.'
             }

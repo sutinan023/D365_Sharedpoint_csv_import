@@ -15,6 +15,30 @@ Preview and create the directory/ACL layout with
 `tools\prepare_environment.ps1`. Supply the actual Windows identities used by
 Apache and Task Scheduler; the script never guesses service accounts.
 
+## เมนูภาษาไทยสำหรับงานประจำ
+
+ผู้พัฒนาเป็นผู้ commit โค้ดเอง จากนั้นเรียกเมนู:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\release.ps1
+```
+
+หรือเรียกแบบไม่เปิดเมนู:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\release.ps1 -Action DeployUAT -ReleaseId 2026-08-05.1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\release.ps1 -Action Compare -ReleaseId 2026-08-05.1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\release.ps1 -Action PromoteProduction -ReleaseId 2026-08-05.1 -PlanOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\release.ps1 -Action PromoteProduction -ReleaseId 2026-08-05.1
+```
+
+ลำดับงานปกติคือ Deploy UAT, ทดสอบ UAT ด้วยผู้ใช้งาน, Compare และ Promote
+Git commit เดิมไป Production ห้ามคัดลอกไฟล์จาก UAT ไป Production โดยตรง
+release manifest ถูกเก็บนอก Git ที่ `C:\xampp\backups\d365\releases`.
+
+ใช้ `-PlanOnly` ก่อนทุกครั้งที่ต้องการทดลอง หน้านี้ไม่สร้าง manifest, ไม่หยุด
+Scheduled Task, ไม่แตะฐานข้อมูล และไม่คัดลอกไฟล์ Production.
+
 ## Prepare a release
 
 1. Ensure all three repositories are clean, then create an immutable manifest
@@ -65,6 +89,52 @@ Apache and Task Scheduler; the script never guesses service accounts.
   checkpoint. After new Production writes exist, stop services and take a new
   snapshot; use a forward fix or compensating migration instead of overwriting
   the database.
+
+### ทำ Restore rehearsal เองเมื่อเมนูพบ migration
+
+1. หยุด Production Scheduled Tasks และสร้าง checkpoint:
+
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\tools\database_checkpoint.ps1 `
+     -Environment Production -ReleaseId 2026-08-05.1 `
+     -ProjectRoot C:\xampp\htdocs\prod\D365_Sharedpoint_csv_import
+   ```
+
+   ยืนยันด้วย `CHECKPOINT PRODUCTION 2026-08-05.1` และเก็บทั้งไฟล์ `.sql`
+   กับ `.sql.json` ไว้ด้วยกัน ห้ามแก้ไขไฟล์ทั้งสอง
+
+2. ใช้ `prepare_restore_rehearsal.ps1` สร้างไฟล์ `.sanitized.sql` โดยกรอก
+   `ExpectedDefinerCount` และ `ExpectedQualifiedReferenceCount` จาก schema
+   inventory ที่ตรวจไว้ ห้ามเดาค่า
+
+3. ใน phpMyAdmin สร้างฐานชื่อใหม่ เช่น
+   `D365_finance_prod_rehearsal_20260805_1` แล้ว Import เฉพาะไฟล์
+   `.sanitized.sql` ห้ามเลือก `D365_finance_prod` หรือ `D365_finance`
+
+4. ตรวจ row count ของ `import_files`, `payment_outbound`,
+   `payment_mail_log`, `sharepoint_file_queue`; ตรวจ row count และ
+   `SECURITY_TYPE=INVOKER` ของ `vw_import_report` กับ
+   `v_tbpayin_from_payment_outbound`; และตรวจว่าจำนวน view definition ที่
+   อ้าง `D365_finance_prod` เท่ากับ `0`
+
+5. ใช้ `tools\new_restore_evidence.ps1` บันทึกค่าที่เห็น โดยต้องยืนยัน
+   `CREATE RESTORE EVIDENCE <release-id>` ตัวช่วยนี้สร้าง JSON ให้และไม่ยอม
+   รับ security type อื่นหรือ live-schema reference ที่มากกว่า `0`
+
+6. สร้าง receipt ด้วย `tools\approve_restore_rehearsal.ps1` โดยส่ง
+   checkpoint manifest, sanitizer audit, restore evidence และยืนยัน
+   `RESTORE TEST PASSED <release-id>`
+
+7. เปิดเมนูข้อ 3 อีกครั้ง เมนูจะถาม path ของ `.sql.json` และ
+   `restore-approved.json` จากนั้นต้องยืนยันตามลำดับ:
+
+   ```text
+   APPLY MIGRATION <release-id>
+   APPROVE PRODUCTION <release-id>
+   ```
+
+   ระบบจะ Apply migration รอบแรกและรันซ้ำอีกครั้ง รอบที่สองต้องไม่มี migration
+   ถูก Apply เพิ่ม หากขั้นตอนไหนล้มเหลว Production tasks จะยังคงปิดอยู่
 
 ## Scheduler sequence
 
