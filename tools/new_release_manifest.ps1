@@ -19,6 +19,25 @@ $projectRoots = @{
     finance_report = if ($FinanceReportRoot) { $FinanceReportRoot } else { Join-Path $SourceParent 'finance_report' }
 }
 $projects = [ordered]@{}
+$migrations = [ordered]@{}
+
+function Get-CommittedMigrationFiles {
+    param(
+        [Parameter(Mandatory = $true)][string] $ProjectRoot,
+        [Parameter(Mandatory = $true)][string] $Head
+    )
+
+    $paths = @(& git -C $ProjectRoot ls-tree -r --name-only $Head -- database/migrations)
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to inspect committed migrations in $ProjectRoot"
+    }
+
+    return @($paths |
+        Where-Object { $_ -match '^database/migrations/[^/]+\.sql$' } |
+        ForEach-Object { Split-Path -Leaf $_ } |
+        Sort-Object)
+}
+
 foreach ($projectName in $projectNames) {
     $projectRoot = $projectRoots[$projectName]
     $dirty = (& git -C $projectRoot status --porcelain --untracked-files=all | Out-String).Trim()
@@ -33,24 +52,14 @@ foreach ($projectName in $projectNames) {
         throw "Unable to resolve Git SHA for $projectName"
     }
     $projects[$projectName] = [ordered]@{ git_sha = $sha }
+    $migrations[$projectName] = @(Get-CommittedMigrationFiles -ProjectRoot $projectRoot -Head $sha)
 }
 
 $manifest = [ordered]@{
     release_id = $ReleaseId
     created_at = (Get-Date).ToString('o')
     projects = $projects
-    migrations = [ordered]@{
-        D365_Sharedpoint_csv_import = @(
-            '000_create_schema_migrations.sql',
-            '001_create_sharepoint_file_queue.sql',
-            '002_add_pending_archive_to_import_files_status.sql',
-            '003_add_effective_date_to_stg_received_outbound.sql',
-            '004_create_vw_import_report.sql',
-            '005_create_v_tbpayin_from_payment_outbound.sql'
-        )
-        D365_file_csv_import = @()
-        finance_report = @()
-    }
+    migrations = $migrations
 }
 
 $json = $manifest | ConvertTo-Json -Depth 6

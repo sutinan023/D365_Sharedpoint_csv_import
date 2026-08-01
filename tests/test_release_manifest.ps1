@@ -8,6 +8,21 @@ try {
         $root = Join-Path $testRoot $project
         New-Item -ItemType Directory $root | Out-Null
         Set-Content (Join-Path $root 'tracked.txt') $project
+        if ($project -eq 'D365_Sharedpoint_csv_import') {
+            $migrationDirectory = Join-Path $root 'database\migrations'
+            New-Item -ItemType Directory $migrationDirectory -Force | Out-Null
+            foreach ($migration in @(
+                '000_create_schema_migrations.sql',
+                '001_create_sharepoint_file_queue.sql',
+                '002_add_pending_archive_to_import_files_status.sql',
+                '003_add_effective_date_to_stg_received_outbound.sql',
+                '004_create_vw_import_report.sql',
+                '005_create_v_tbpayin_from_payment_outbound.sql',
+                '006_test.sql'
+            )) {
+                Set-Content (Join-Path $migrationDirectory $migration) "SELECT '$migration';"
+            }
+        }
         & git -C $root init --quiet
         & git -C $root config user.email 'test@example.invalid'
         & git -C $root config user.name 'Test'
@@ -29,7 +44,8 @@ try {
         '002_add_pending_archive_to_import_files_status.sql',
         '003_add_effective_date_to_stg_received_outbound.sql',
         '004_create_vw_import_report.sql',
-        '005_create_v_tbpayin_from_payment_outbound.sql'
+        '005_create_v_tbpayin_from_payment_outbound.sql',
+        '006_test.sql'
     )
     $actualMigrations = @($manifest.migrations.D365_Sharedpoint_csv_import)
     if ((Compare-Object $expectedMigrations $actualMigrations -SyncWindow 0).Count -ne 0) {
