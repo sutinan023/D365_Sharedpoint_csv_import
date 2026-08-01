@@ -206,6 +206,62 @@ try {
     Assert-True (@($success | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) 'Local Production gate success was not reported.'
     $afterProductionFiles = @(Get-ChildItem -LiteralPath $productionRoot -File -Recurse -Force | ForEach-Object { $_.FullName })
     Assert-True (($beforeProductionFiles -join "`n") -ceq ($afterProductionFiles -join "`n")) 'A rejected or local Production plan changed Production files.'
+
+    # A migration release is visible in PlanOnly and requires the guarded coordinator before promotion.
+    $migrationReleaseId = '2026-08-01.5'
+    $sharePointSource = Join-Path $sourceParent 'D365_Sharedpoint_csv_import'
+    $migrationDirectory = Join-Path $sharePointSource 'database\migrations'
+    New-Item -ItemType Directory -Path $migrationDirectory -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $migrationDirectory '006_test.sql') -Value 'SELECT 1;'
+    & git -C $sharePointSource add .
+    & git -C $sharePointSource commit --quiet -m migration-release
+    $manifestProjects.D365_Sharedpoint_csv_import.git_sha = (& git -C $sharePointSource rev-parse HEAD).Trim()
+    $uatSharePointMigration = Join-Path $uatRoot 'D365_Sharedpoint_csv_import\database\migrations'
+    New-Item -ItemType Directory -Path $uatSharePointMigration -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $migrationDirectory '006_test.sql') -Destination (Join-Path $uatSharePointMigration '006_test.sql')
+    [ordered]@{ release_id=$migrationReleaseId; environment='UAT'; project='D365_Sharedpoint_csv_import'; git_sha=[string]$manifestProjects.D365_Sharedpoint_csv_import.git_sha } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $uatRoot 'D365_Sharedpoint_csv_import\.deployment\current-release.json') -Encoding UTF8
+    foreach ($project in @('D365_file_csv_import','finance_report')) {
+        $metadataPath = Join-Path $uatRoot "$project\.deployment\current-release.json"
+        $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+        $metadata.release_id = $migrationReleaseId
+        $metadata | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+    }
+    $migrationManifestPath = Join-Path $releaseRoot "$migrationReleaseId.json"
+    [ordered]@{ release_id=$migrationReleaseId; projects=$manifestProjects; migrations=[ordered]@{
+        D365_Sharedpoint_csv_import=@('006_test.sql'); D365_file_csv_import=@(); finance_report=@()
+    }} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $migrationManifestPath -Encoding UTF8
+    $migrationPromotion = @{ Action='PromoteProduction'; ReleaseId=$migrationReleaseId; SourceParent=$sourceParent; UatRoot=$uatRoot
+        ProductionRoot=$productionRoot; ReleaseRoot=$releaseRoot; LocalTestMode=$true }
+    $migrationPlan = @(& $scriptPath @migrationPromotion -PlanOnly)
+    Assert-True (@($migrationPlan | Where-Object { $_ -is [string] -and $_ -match '006_test.sql' }).Count -eq 1) 'Migration PlanOnly did not list the migration.'
+    Assert-Throws {
+        & $scriptPath @migrationPromotion -ApprovalAuditRoot $auditRoot `
+            -UatAcceptanceToken "APPROVE UAT RESULT $migrationReleaseId" | Out-Null
+    } 'MigrationBackupManifestPath'
+    $migrationManifestHash = (Get-FileHash -LiteralPath $migrationManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $migrationReceiptPath = Join-Path $auditRoot "uat-approval-$migrationReleaseId-$migrationManifestHash.json"
+    $migrationReceiptHash = (Get-FileHash -LiteralPath $migrationReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+
+    $migrationStages = [Collections.Generic.List[string]]::new()
+    $migrationAdapter = {
+        param([string] $Stage, [hashtable] $Context)
+        $migrationStages.Add($Stage)
+        switch ($Stage) {
+            'disable-production-tasks' { [pscustomobject]@{Success=$true;PreviouslyEnabledTasks=@('Import A')} }
+            'apply-production' { [pscustomobject]@{Success=$true;Applied=@('006_test.sql')} }
+            'apply-production-idempotence-check' { [pscustomobject]@{Success=$true;Applied=@()} }
+            'restore-production-task-states' { [pscustomobject]@{Success=$true;RestoredTasks=@('Import A')} }
+            default { [pscustomobject]@{Success=$true} }
+        }
+    }.GetNewClosure()
+    $migrationSuccess = @(& $scriptPath @migrationPromotion -ApprovalAuditRoot $auditRoot `
+        -UatApprovalPath $migrationReceiptPath -ExpectedUatApprovalSha256 $migrationReceiptHash `
+        -ProductionApprovalToken "APPROVE PRODUCTION $migrationReleaseId" `
+        -MigrationApprovalToken "APPLY MIGRATION $migrationReleaseId" -MigrationCommandAdapter $migrationAdapter)
+    Assert-True ($migrationStages -contains 'apply-production-idempotence-check') 'Migration promotion skipped the idempotence check.'
+    Assert-True ($migrationStages[-1] -ceq 'restore-production-task-states') 'Migration promotion did not restore task states last.'
+    Assert-True (@($migrationSuccess | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) 'Migration promotion did not complete its local gates.'
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }

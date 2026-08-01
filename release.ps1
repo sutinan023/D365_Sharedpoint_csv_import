@@ -16,6 +16,17 @@ param(
     [string] $UatApprovalPath,
     [ValidatePattern('^[0-9a-fA-F]{64}$')][string] $ExpectedUatApprovalSha256,
     [string] $PhpPath = 'C:\xampp\php\php.exe',
+    [string] $MigrationApprovalToken,
+    [string] $MigrationBackupRoot = 'C:\xampp\backups\d365',
+    [string] $MigrationBackupManifestPath,
+    [string] $MigrationRestoreReceiptPath,
+    [string] $MigrationAppliedBy = $env:USERNAME,
+    [string[]] $ProductionTaskNames = @(
+        'D365 SharePoint CSV Import [PROD]',
+        'D365 File CSV Import [PROD]',
+        'D365 SharePoint CSV Download Cleanup [PROD]'
+    ),
+    [scriptblock] $MigrationCommandAdapter,
     [switch] $PlanOnly,
     [switch] $LocalTestMode
 )
@@ -23,6 +34,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $toolRoot = Join-Path $PSScriptRoot 'tools'
 . (Join-Path $toolRoot 'release_common.ps1')
+. (Join-Path $toolRoot 'release_migration.ps1')
+. (Join-Path $toolRoot 'manual_restore_migration_adapter.ps1')
 
 function Assert-ReleaseId {
     if ([string]::IsNullOrWhiteSpace($ReleaseId)) {
@@ -235,15 +248,24 @@ function Invoke-PromoteProduction {
     if (@($risks.Values | Where-Object Kind -ceq 'Operational').Count -gt 0) {
         throw 'Operational release detected. Use the maintenance runbook instead of routine Production promotion.'
     }
-    if (@($risks.Values | Where-Object Kind -ceq 'Migration').Count -gt 0) {
-        throw 'Migration release detected. Guarded migration coordination is required before Production promotion.'
-    }
+    $migrationProjects = @($risks.Keys | Where-Object { $risks[$_].Kind -ceq 'Migration' })
 
     $productionComparison = @(Invoke-EnvironmentComparison -Environment 'PRODUCTION' -EnvironmentRoot $ProductionRoot -Manifest $release.Manifest)
     Write-Output "แผน Promote Production สำหรับ release $ReleaseId"
     foreach ($result in $productionComparison) { Write-Output $result }
+    if ($migrationProjects.Count -gt 0) {
+        Write-Output 'ตรวจพบ Database migration:'
+        foreach ($project in $migrationProjects) {
+            foreach ($path in $risks[$project].MigrationPaths) { Write-Output "- $project/$path" }
+        }
+        Write-Output 'ต้องทำ checkpoint และ Restore rehearsal ให้ผ่านก่อน Apply Production'
+    }
     if ($PlanOnly) {
-        Write-Output 'PlanOnly: ผ่านด่าน UAT และเป็น code-only; ยังไม่มีการสร้าง receipt หรือคัดลอกไฟล์ Production'
+        if ($migrationProjects.Count -eq 0) {
+            Write-Output 'PlanOnly: ผ่านด่าน UAT และเป็น code-only; ยังไม่มีการสร้าง receipt หรือคัดลอกไฟล์ Production'
+        } else {
+            Write-Output 'PlanOnly: พบ migration และหยุดก่อน checkpoint, restore, apply หรือคัดลอก Production'
+        }
         return
     }
 
@@ -268,6 +290,25 @@ function Invoke-PromoteProduction {
         }
     }
 
+    $migrationResult = $null
+    if ($migrationProjects.Count -gt 0) {
+        if ($null -eq $MigrationCommandAdapter) {
+            if ([string]::IsNullOrWhiteSpace($MigrationBackupManifestPath) -or [string]::IsNullOrWhiteSpace($MigrationRestoreReceiptPath)) {
+                throw 'Migration release requires -MigrationBackupManifestPath and -MigrationRestoreReceiptPath after the manual Restore rehearsal. No Production change was made.'
+            }
+            $MigrationCommandAdapter = New-D365ManualRestoreMigrationAdapter -Manifest $release.Manifest `
+                -SourceProjects $sourceProjects -ProductionRoot $ProductionRoot `
+                -BackupManifestPath $MigrationBackupManifestPath -RestoreReceiptPath $MigrationRestoreReceiptPath `
+                -PhpPath $PhpPath -AppliedBy $MigrationAppliedBy
+        }
+        if ([string]::IsNullOrWhiteSpace($MigrationApprovalToken)) {
+            $MigrationApprovalToken = Read-Host "พิมพ์ APPLY MIGRATION $ReleaseId หลัง Restore rehearsal ผ่าน"
+        }
+        $migrationResult = Invoke-D365MigrationPromotion -ReleaseId $ReleaseId -ManifestPath $release.Path `
+            -ProjectRoot $sourceProjects.D365_Sharedpoint_csv_import.SourceRoot -BackupRoot $MigrationBackupRoot `
+            -TaskNames $ProductionTaskNames -ApprovalToken $MigrationApprovalToken -CommandAdapter $MigrationCommandAdapter
+    }
+
     foreach ($project in $script:D365ProjectNames) {
         $entry = $sourceProjects[$project]
         $validation = @{
@@ -288,6 +329,9 @@ function Invoke-PromoteProduction {
     Assert-D365Approval -Expected $expectedProductionApproval -Actual $actualProductionApproval
 
     if ($LocalTestMode) {
+        if ($null -ne $migrationResult) {
+            Complete-D365MigrationPromotion -MigrationResult $migrationResult -CommandAdapter $MigrationCommandAdapter -ProductionDeployVerified | Out-Null
+        }
         Write-Output 'LocalTestMode: Production gates passed; Production files were not changed.'
         return
     }
@@ -303,6 +347,9 @@ function Invoke-PromoteProduction {
     $postComparison = @(Invoke-EnvironmentComparison -Environment 'PRODUCTION' -EnvironmentRoot $ProductionRoot -Manifest $release.Manifest)
     if ((@($postComparison | Measure-Object -Property Total -Sum).Sum) -ne 0) {
         throw 'Production code differs from the attested Git release after deployment.'
+    }
+    if ($null -ne $migrationResult) {
+        Complete-D365MigrationPromotion -MigrationResult $migrationResult -CommandAdapter $MigrationCommandAdapter -ProductionDeployVerified | Out-Null
     }
     [pscustomobject]@{ ReleaseId = $ReleaseId; Status = 'DEPLOYED'; PostDeployDifferenceCount = 0 }
 }
