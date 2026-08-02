@@ -11,6 +11,7 @@
     [string] $ReleaseRoot = 'C:\xampp\backups\d365\releases',
     [string] $ApprovalToken,
     [string] $UatAcceptanceToken,
+    [string] $OperationalApprovalToken,
     [string] $ProductionApprovalToken,
     [string] $ApprovalAuditRoot = 'C:\xampp\backups\d365\release-approvals',
     [string] $UatApprovalPath,
@@ -298,14 +299,18 @@ function Invoke-PromoteProduction {
             -FromSha ([string] $productionMetadata[$project].git_sha) `
             -ToSha ([string] $release.Manifest.projects.$project.git_sha)
     }
-    if (@($risks.Values | Where-Object Kind -ceq 'Operational').Count -gt 0) {
-        throw 'Operational release detected. Use the maintenance runbook instead of routine Production promotion.'
-    }
-    $migrationProjects = @($risks.Keys | Where-Object { $risks[$_].Kind -ceq 'Migration' })
+    $operationalProjects = @($risks.Keys | Where-Object { @($risks[$_].OperationalPaths).Count -gt 0 })
+    $migrationProjects = @($risks.Keys | Where-Object { @($risks[$_].MigrationPaths).Count -gt 0 })
 
     $productionComparison = @(Invoke-EnvironmentComparison -Environment 'PRODUCTION' -EnvironmentRoot $ProductionRoot -Manifest $release.Manifest)
     Write-Output "แผน Promote Production สำหรับ release $ReleaseId"
     foreach ($result in $productionComparison) { Write-Output $result }
+    if ($operationalProjects.Count -gt 0) {
+        Write-Output 'ตรวจพบไฟล์ที่มีผลต่อการตั้งค่าระบบ:'
+        foreach ($project in $operationalProjects) {
+            foreach ($path in $risks[$project].OperationalPaths) { Write-Output "- $project/$path" }
+        }
+    }
     if ($migrationProjects.Count -gt 0) {
         Write-Output 'ตรวจพบ Database migration:'
         foreach ($project in $migrationProjects) {
@@ -314,7 +319,9 @@ function Invoke-PromoteProduction {
         Write-Output 'ต้องทำ checkpoint และ Restore rehearsal ให้ผ่านก่อน Apply Production'
     }
     if ($PlanOnly) {
-        if ($migrationProjects.Count -eq 0) {
+        if ($operationalProjects.Count -gt 0 -and $migrationProjects.Count -eq 0) {
+            Write-Output 'PlanOnly: พบไฟล์ Operational และหยุดก่อนการอนุมัติหรือคัดลอก Production'
+        } elseif ($migrationProjects.Count -eq 0) {
             Write-Output 'PlanOnly: ผ่านด่าน UAT และเป็น code-only; ยังไม่มีการสร้าง receipt หรือคัดลอกไฟล์ Production'
         } else {
             Write-Output 'PlanOnly: พบ migration และหยุดก่อน checkpoint, restore, apply หรือคัดลอก Production'
@@ -329,9 +336,10 @@ function Invoke-PromoteProduction {
         $actualAcceptance = $UatAcceptanceToken
         if ([string]::IsNullOrWhiteSpace($actualAcceptance)) {
             if ($interactiveMenu) {
-                $thaiAcceptance = "ยืนยันว่าทดสอบ UAT ผ่าน $ReleaseId"
-                $answer = Read-WizardAnswer "พิมพ์ $thaiAcceptance"
-                if ($answer -cne $thaiAcceptance) { throw 'ข้อความยืนยันผลทดสอบ UAT ไม่ถูกต้อง' }
+                if (-not (Read-WizardConfirmation "ยืนยันว่าทดสอบ UAT Release $ReleaseId ผ่านแล้วหรือไม่?")) {
+                    Write-Output "ยกเลิกการนำ Release $ReleaseId ขึ้น Production"
+                    return
+                }
                 $actualAcceptance = $expectedAcceptance
             } else {
                 $actualAcceptance = Read-Host "พิมพ์ $expectedAcceptance หลังผู้ใช้รับรอง UAT"
@@ -349,6 +357,36 @@ function Invoke-PromoteProduction {
             throw 'UAT approval receipt SHA-256 does not match the exact expected hash.'
         }
     }
+
+    if ($operationalProjects.Count -gt 0) {
+        $expectedOperationalApproval = "APPROVE OPERATIONAL $ReleaseId"
+        $actualOperationalApproval = $OperationalApprovalToken
+        if ($interactiveMenu) {
+            if (-not (Read-WizardConfirmation "ยืนยันดำเนินการไฟล์ตั้งค่าระบบสำหรับ Release $ReleaseId หรือไม่?")) {
+                Write-Output "ยกเลิก Operational Release $ReleaseId ก่อนดำเนินการ Production"
+                return
+            }
+            $actualOperationalApproval = $expectedOperationalApproval
+        } elseif ([string]::IsNullOrWhiteSpace($actualOperationalApproval)) {
+            $actualOperationalApproval = '<missing>'
+        }
+        Assert-D365Approval -Expected $expectedOperationalApproval -Actual $actualOperationalApproval
+    }
+
+    $expectedProductionApproval = "APPROVE PRODUCTION $ReleaseId"
+    $actualProductionApproval = $ProductionApprovalToken
+    if ([string]::IsNullOrWhiteSpace($actualProductionApproval)) {
+        if ($interactiveMenu) {
+            if (-not (Read-WizardConfirmation "ยืนยันนำ Release $ReleaseId ขึ้น Production หรือไม่?")) {
+                Write-Output "ยกเลิกการนำ Release $ReleaseId ขึ้น Production"
+                return
+            }
+            $actualProductionApproval = $expectedProductionApproval
+        } else {
+            $actualProductionApproval = Read-Host "พิมพ์ $expectedProductionApproval เพื่อยืนยัน"
+        }
+    }
+    Assert-D365Approval -Expected $expectedProductionApproval -Actual $actualProductionApproval
 
     $migrationResult = $null
     if ($migrationProjects.Count -gt 0) {
@@ -368,10 +406,15 @@ function Invoke-PromoteProduction {
         $migrationApprovalProvider = $null
         if ([string]::IsNullOrWhiteSpace($MigrationApprovalToken)) {
             $migrationApprovalProvider = if ($interactiveMenu) {
+                $migrationApprovalReader = if ($LocalTestMode -and $null -ne $WizardInputAdapter) {
+                    $WizardInputAdapter
+                } else {
+                    { param([string] $Prompt) Read-Host $Prompt }
+                }
                 {
                     param([string] $ApprovedReleaseId)
                     $thaiMigrationApproval = "ยืนยันใช้ MIGRATION $ApprovedReleaseId"
-                    $answer = Read-WizardAnswer "พิมพ์ $thaiMigrationApproval"
+                    $answer = & $migrationApprovalReader "พิมพ์ $thaiMigrationApproval"
                     if ($answer -cne $thaiMigrationApproval) { throw 'ข้อความยืนยัน Migration ไม่ถูกต้อง' }
                     return "APPLY MIGRATION $ApprovedReleaseId"
                 }.GetNewClosure()
@@ -403,20 +446,6 @@ function Invoke-PromoteProduction {
         }
         & (Join-Path $toolRoot 'sync_to_server.ps1') @validation | Out-Null
     }
-
-    $expectedProductionApproval = "APPROVE PRODUCTION $ReleaseId"
-    $actualProductionApproval = $ProductionApprovalToken
-    if ([string]::IsNullOrWhiteSpace($actualProductionApproval)) {
-        if ($interactiveMenu) {
-            $thaiProductionApproval = "ยืนยันนำขึ้น PRODUCTION $ReleaseId"
-            $answer = Read-WizardAnswer "พิมพ์ $thaiProductionApproval"
-            if ($answer -cne $thaiProductionApproval) { throw 'ข้อความยืนยัน Production ไม่ถูกต้อง' }
-            $actualProductionApproval = $expectedProductionApproval
-        } else {
-            $actualProductionApproval = Read-Host "พิมพ์ $expectedProductionApproval เพื่อยืนยัน"
-        }
-    }
-    Assert-D365Approval -Expected $expectedProductionApproval -Actual $actualProductionApproval
 
     if ($LocalTestMode) {
         if ($null -ne $migrationResult) {

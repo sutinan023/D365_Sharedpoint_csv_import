@@ -16,7 +16,7 @@ Assert-True ($releaseScriptBytes.Length -ge 3 -and $releaseScriptBytes[0] -eq 0x
     $releaseScriptBytes[1] -eq 0xBB -and $releaseScriptBytes[2] -eq 0xBF) `
     'release.ps1 must use UTF-8 BOM so Windows PowerShell 5.1 parses Thai text correctly.'
 $releaseScriptText = [Text.Encoding]::UTF8.GetString($releaseScriptBytes)
-foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT ผ่าน','ยืนยันใช้ MIGRATION','ยืนยันนำขึ้น PRODUCTION','กด Enter หลัง Import สำเร็จ')) {
+foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT','ยืนยันใช้ MIGRATION','กด Enter หลัง Import สำเร็จ')) {
     Assert-True ($releaseScriptText.Contains($thaiPrompt)) "Thai confirmation is missing: $thaiPrompt"
 }
 foreach ($removedPrompt in @('ระบุ path ของ checkpoint manifest','ระบุ path ของ restore-approved receipt')) {
@@ -288,9 +288,87 @@ try {
     $afterProductionFiles = @(Get-ChildItem -LiteralPath $productionRoot -File -Recurse -Force | ForEach-Object { $_.FullName })
     Assert-True (($beforeProductionFiles -join "`n") -ceq ($afterProductionFiles -join "`n")) 'A rejected or local Production plan changed Production files.'
 
-    # A migration release is visible in PlanOnly and requires the guarded coordinator before promotion.
-    $migrationReleaseId = '2026-08-01.5'
+    # An Operational-only release lists its paths and requires a distinct approval before Production work.
+    $operationalReleaseId = '2026-08-01.5'
     $sharePointSource = Join-Path $sourceParent 'D365_Sharedpoint_csv_import'
+    $operationalDirectory = Join-Path $sharePointSource 'config'
+    New-Item -ItemType Directory -Path $operationalDirectory -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $operationalDirectory 'runtime.php') -Value '<?php return [];'
+    & git -C $sharePointSource add .
+    & git -C $sharePointSource commit --quiet -m operational-release
+    $manifestProjects.D365_Sharedpoint_csv_import.git_sha = (& git -C $sharePointSource rev-parse HEAD).Trim()
+    $uatOperationalDirectory = Join-Path $uatRoot 'D365_Sharedpoint_csv_import\config'
+    New-Item -ItemType Directory -Path $uatOperationalDirectory -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $operationalDirectory 'runtime.php') -Destination (Join-Path $uatOperationalDirectory 'runtime.php')
+    [ordered]@{ release_id=$operationalReleaseId; environment='UAT'; project='D365_Sharedpoint_csv_import'; git_sha=[string]$manifestProjects.D365_Sharedpoint_csv_import.git_sha } |
+        ConvertTo-Json | Set-Content -LiteralPath (Join-Path $uatRoot 'D365_Sharedpoint_csv_import\.deployment\current-release.json') -Encoding UTF8
+    foreach ($project in @('D365_file_csv_import','finance_report')) {
+        $metadataPath = Join-Path $uatRoot "$project\.deployment\current-release.json"
+        $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+        $metadata.release_id = $operationalReleaseId
+        $metadata | ConvertTo-Json | Set-Content -LiteralPath $metadataPath -Encoding UTF8
+    }
+    $operationalManifestPath = Join-Path $releaseRoot "$operationalReleaseId.json"
+    [ordered]@{ release_id=$operationalReleaseId; projects=$manifestProjects; migrations=[ordered]@{
+        D365_Sharedpoint_csv_import=@(); D365_file_csv_import=@(); finance_report=@()
+    }} | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $operationalManifestPath -Encoding UTF8
+    $operationalPromotion = @{ Action='PromoteProduction'; ReleaseId=$operationalReleaseId; SourceParent=$sourceParent; UatRoot=$uatRoot
+        ProductionRoot=$productionRoot; ReleaseRoot=$releaseRoot; LocalTestMode=$true }
+    $operationalPlan = @(& $scriptPath @operationalPromotion -PlanOnly)
+    Assert-True (@($operationalPlan | Where-Object { $_ -is [string] -and $_ -ceq '- D365_Sharedpoint_csv_import/config/runtime.php' }).Count -eq 1) `
+        'Operational PlanOnly did not list the project/path.'
+
+    Assert-Throws {
+        & $scriptPath @operationalPromotion -ApprovalAuditRoot $auditRoot `
+            -UatAcceptanceToken "APPROVE UAT RESULT $operationalReleaseId" `
+            -ProductionApprovalToken "APPROVE PRODUCTION $operationalReleaseId" | Out-Null
+    } 'approval'
+    $operationalManifestHash = (Get-FileHash -LiteralPath $operationalManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $operationalReceiptPath = Join-Path $auditRoot "uat-approval-$operationalReleaseId-$operationalManifestHash.json"
+    Assert-True (Test-Path -LiteralPath $operationalReceiptPath -PathType Leaf) 'Operational rejection did not preserve the UAT receipt.'
+    $operationalReceiptHash = (Get-FileHash -LiteralPath $operationalReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    Assert-Throws {
+        & $scriptPath @operationalPromotion -ApprovalAuditRoot $auditRoot `
+            -UatApprovalPath $operationalReceiptPath -ExpectedUatApprovalSha256 $operationalReceiptHash `
+            -OperationalApprovalToken 'wrong-operational-approval' `
+            -ProductionApprovalToken "APPROVE PRODUCTION $operationalReleaseId" | Out-Null
+    } 'approval'
+    $operationalSuccess = @(& $scriptPath @operationalPromotion -ApprovalAuditRoot $auditRoot `
+        -UatApprovalPath $operationalReceiptPath -ExpectedUatApprovalSha256 $operationalReceiptHash `
+        -OperationalApprovalToken "APPROVE OPERATIONAL $operationalReleaseId" `
+        -ProductionApprovalToken "APPROVE PRODUCTION $operationalReleaseId")
+    Assert-True (@($operationalSuccess | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) `
+        'Exact Operational token did not pass in LocalTestMode.'
+
+    Remove-Item -LiteralPath $operationalReceiptPath -Force
+    $operationalCancelStages = [Collections.Generic.List[string]]::new()
+    $operationalCancelAdapter = {
+        param([string] $Stage, [hashtable] $Context)
+        $operationalCancelStages.Add($Stage)
+        [pscustomobject]@{ Success=$true }
+    }.GetNewClosure()
+    $operationalCancelAnswers = [Collections.Generic.Queue[string]]::new()
+    foreach ($answer in @('2','Y','N')) { $operationalCancelAnswers.Enqueue($answer) }
+    $operationalCancelPrompts = [Collections.Generic.List[string]]::new()
+    $operationalCancelInput = {
+        param([string] $Prompt)
+        $operationalCancelPrompts.Add($Prompt)
+        if ($operationalCancelPrompts.Count -eq 3 -and (Test-Path -LiteralPath $operationalReceiptPath)) {
+            Remove-Item -LiteralPath $operationalReceiptPath -Force
+        }
+        $operationalCancelAnswers.Dequeue()
+    }.GetNewClosure()
+    $operationalCancelOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -ApprovalAuditRoot $auditRoot `
+        -LocalTestMode -WizardInputAdapter $operationalCancelInput -MigrationCommandAdapter $operationalCancelAdapter 6>&1)
+    Assert-True (@($operationalCancelPrompts | Where-Object { $_ -match 'ตั้งค่าระบบ' }).Count -eq 1) 'Operational Y/N prompt was not shown.'
+    Assert-True (@($operationalCancelPrompts | Where-Object { $_ -match 'Production' }).Count -eq 0) 'Operational N reached the Production prompt.'
+    Assert-True ($operationalCancelStages.Count -eq 0) 'Operational N reached the migration adapter.'
+    Assert-True (@($operationalCancelOutput | Where-Object { $_ -is [string] -and $_ -match 'ยกเลิก.*Operational' }).Count -eq 1) `
+        'Operational N did not cancel safely before Production sync validation.'
+
+    # A mixed Operational + migration release keeps both risk gates and confirms before the guarded coordinator.
+    $migrationReleaseId = '2026-08-01.6'
     $migrationDirectory = Join-Path $sharePointSource 'database\migrations'
     New-Item -ItemType Directory -Path $migrationDirectory -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $migrationDirectory '006_test.sql') -Value 'SELECT 1;'
@@ -316,9 +394,12 @@ try {
         ProductionRoot=$productionRoot; ReleaseRoot=$releaseRoot; LocalTestMode=$true }
     $migrationPlan = @(& $scriptPath @migrationPromotion -PlanOnly)
     Assert-True (@($migrationPlan | Where-Object { $_ -is [string] -and $_ -match '006_test.sql' }).Count -eq 1) 'Migration PlanOnly did not list the migration.'
+    Assert-True (@($migrationPlan | Where-Object { $_ -is [string] -and $_ -match 'config/runtime.php' }).Count -eq 1) 'Mixed PlanOnly lost the Operational path.'
     Assert-Throws {
         & $scriptPath @migrationPromotion -ApprovalAuditRoot $auditRoot `
-            -UatAcceptanceToken "APPROVE UAT RESULT $migrationReleaseId" | Out-Null
+            -UatAcceptanceToken "APPROVE UAT RESULT $migrationReleaseId" `
+            -OperationalApprovalToken "APPROVE OPERATIONAL $migrationReleaseId" `
+            -ProductionApprovalToken "APPROVE PRODUCTION $migrationReleaseId" | Out-Null
     } 'MigrationCommandAdapter'
     $migrationManifestHash = (Get-FileHash -LiteralPath $migrationManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $migrationReceiptPath = Join-Path $auditRoot "uat-approval-$migrationReleaseId-$migrationManifestHash.json"
@@ -342,11 +423,55 @@ try {
     }.GetNewClosure()
     $migrationSuccess = @(& $scriptPath @migrationPromotion -ApprovalAuditRoot $auditRoot `
         -UatApprovalPath $migrationReceiptPath -ExpectedUatApprovalSha256 $migrationReceiptHash `
+        -OperationalApprovalToken "APPROVE OPERATIONAL $migrationReleaseId" `
         -ProductionApprovalToken "APPROVE PRODUCTION $migrationReleaseId" `
         -MigrationApprovalToken "APPLY MIGRATION $migrationReleaseId" -MigrationCommandAdapter $migrationAdapter)
     Assert-True ($migrationStages -contains 'apply-production-idempotence-check') 'Migration promotion skipped the idempotence check.'
     Assert-True ($migrationStages[-1] -ceq 'restore-production-task-states') 'Migration promotion did not restore task states last.'
     Assert-True (@($migrationSuccess | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) 'Migration promotion did not complete its local gates.'
+
+    Remove-Item -LiteralPath $migrationReceiptPath -Force
+    $migrationStages.Clear()
+    $interactiveOrder = [Collections.Generic.List[string]]::new()
+    $interactivePrompts = [Collections.Generic.List[string]]::new()
+    $interactiveMigrationAdapter = {
+        param([string] $Stage, [hashtable] $Context)
+        $migrationStages.Add($Stage)
+        $interactiveOrder.Add("stage:$Stage")
+        switch ($Stage) {
+            'disable-production-tasks' { [pscustomobject]@{Success=$true;PreviouslyEnabledTasks=@('Import A')} }
+            'prepare-rehearsal' { [pscustomobject]@{Success=$true;RehearsalDatabase="D365_finance_prod_rehearsal_$($migrationReleaseId.Replace('-','_').Replace('.','_'))";SanitizedPath='sanitized.sql';SanitizerAuditPath='sanitized.sql.audit.json'} }
+            'show-manual-restore-instructions' { [pscustomobject]@{Success=$true;RehearsalDatabase="D365_finance_prod_rehearsal_$($migrationReleaseId.Replace('-','_').Replace('.','_'))";SanitizedPath='sanitized.sql'} }
+            'verify-rehearsal-read-only' { [pscustomobject]@{Success=$true;RestoreEvidencePath='restore-evidence.json'} }
+            'approve-rehearsal-automatically' { [pscustomobject]@{Success=$true;RestoreReceiptPath='restore-approved.json'} }
+            'apply-production' { [pscustomobject]@{Success=$true;Applied=@('006_test.sql')} }
+            'apply-production-idempotence-check' { [pscustomobject]@{Success=$true;Applied=@()} }
+            'restore-production-task-states' { [pscustomobject]@{Success=$true;RestoredTasks=@('Import A')} }
+            default { [pscustomobject]@{Success=$true} }
+        }
+    }.GetNewClosure()
+    $interactiveAnswers = [Collections.Generic.Queue[string]]::new()
+    foreach ($answer in @('2','Y','Y','Y',"ยืนยันใช้ MIGRATION $migrationReleaseId")) { $interactiveAnswers.Enqueue($answer) }
+    $interactiveInput = {
+        param([string] $Prompt)
+        $interactivePrompts.Add($Prompt)
+        $interactiveOrder.Add("prompt:$Prompt")
+        $interactiveAnswers.Dequeue()
+    }.GetNewClosure()
+    $interactiveMigrationSuccess = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -ApprovalAuditRoot $auditRoot `
+        -LocalTestMode -WizardInputAdapter $interactiveInput -MigrationCommandAdapter $interactiveMigrationAdapter 6>&1)
+    $firstMigrationStageIndex = $interactiveOrder.IndexOf('stage:disable-production-tasks')
+    $uatPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*UAT' })[0]
+    $operationalPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*ตั้งค่าระบบ' })[0]
+    $productionPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*Production' })[0]
+    Assert-True ($productionPromptEvent -ceq "prompt:ยืนยันนำ Release $migrationReleaseId ขึ้น Production หรือไม่? [Y/N]") `
+        'Interactive Production confirmation did not use the Y/N wizard prompt.'
+    Assert-True ($firstMigrationStageIndex -gt $interactiveOrder.IndexOf($uatPromptEvent)) 'Migration started before UAT confirmation.'
+    Assert-True ($firstMigrationStageIndex -gt $interactiveOrder.IndexOf($operationalPromptEvent)) 'Migration started before Operational confirmation.'
+    Assert-True ($firstMigrationStageIndex -gt $interactiveOrder.IndexOf($productionPromptEvent)) 'Migration started before Production confirmation.'
+    Assert-True (@($interactiveMigrationSuccess | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) `
+        'Interactive mixed-risk promotion did not finish in LocalTestMode.'
 }
 finally {
     if (Test-Path -LiteralPath $testRoot) { Remove-Item -LiteralPath $testRoot -Recurse -Force }

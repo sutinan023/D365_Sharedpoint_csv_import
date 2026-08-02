@@ -98,9 +98,19 @@ try {
     & git -C $riskRepo commit --quiet -m operational
     $operationalSha = (& git -C $riskRepo rev-parse HEAD).Trim()
 
+    New-Item -ItemType Directory (Join-Path $riskRepo 'config') -Force | Out-Null
+    Set-Content (Join-Path $riskRepo 'config\runtime.php') '<?php return [];'
+    Set-Content (Join-Path $riskRepo 'database\migrations\007_mixed.sql') 'SELECT 2;'
+    & git -C $riskRepo add .
+    & git -C $riskRepo commit --quiet -m mixed
+    $mixedSha = (& git -C $riskRepo rev-parse HEAD).Trim()
+
     Assert-True ((Get-D365ReleaseRisk -RepositoryRoot $riskRepo -FromSha $baseSha -ToSha $codeSha).Kind -ceq 'CodeOnly') 'PHP-only change was not CodeOnly.'
     Assert-True ((Get-D365ReleaseRisk -RepositoryRoot $riskRepo -FromSha $codeSha -ToSha $migrationSha).Kind -ceq 'Migration') 'Migration change was not Migration.'
     Assert-True ((Get-D365ReleaseRisk -RepositoryRoot $riskRepo -FromSha $migrationSha -ToSha $operationalSha).Kind -ceq 'Operational') 'Composer lock change was not Operational.'
+    $risk = Get-D365ReleaseRisk -RepositoryRoot $riskRepo -FromSha $operationalSha -ToSha $mixedSha
+    Assert-True ($risk.OperationalPaths -contains 'config/runtime.php') 'Operational path was lost.'
+    Assert-True ($risk.MigrationPaths -contains 'database/migrations/007_mixed.sql') 'Migration path was lost.'
 
     Assert-D365Approval -Expected 'APPROVE UAT r1' -Actual 'APPROVE UAT r1'
     try {
