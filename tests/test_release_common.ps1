@@ -10,6 +10,10 @@ function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw $Message }
 }
 
+function Assert-Equal($Expected, $Actual, [string] $Message) {
+    if ($Expected -cne $Actual) { throw "$Message Expected=$Expected Actual=$Actual" }
+}
+
 try {
     New-Item -ItemType Directory -Path $sourceParent, $environmentRoot | Out-Null
     $manifestProjects = [ordered]@{}
@@ -104,6 +108,34 @@ try {
         throw 'Case-insensitive approval was accepted.'
     } catch {
         if ($_.Exception.Message -notmatch 'approval') { throw }
+    }
+
+    $releaseRoot = Join-Path $testRoot 'releases'
+    New-Item -ItemType Directory -Path $releaseRoot | Out-Null
+    Assert-Equal '2026-08-02.1' (Get-D365NextReleaseId -ReleaseRoot $releaseRoot -Now ([datetime]'2026-08-02')) 'First daily release ID is wrong.'
+    Set-Content -LiteralPath (Join-Path $releaseRoot '2026-08-02.1.json') '{}'
+    Set-Content -LiteralPath (Join-Path $releaseRoot '2026-08-02.3.json') '{}'
+    Set-Content -LiteralPath (Join-Path $releaseRoot '2026-08-01.99.json') '{}'
+    Set-Content -LiteralPath (Join-Path $releaseRoot '2026-08-02.bad.json') '{}'
+    Assert-Equal '2026-08-02.4' (Get-D365NextReleaseId -ReleaseRoot $releaseRoot -Now ([datetime]'2026-08-02')) 'Daily release sequence did not use the highest valid number.'
+
+    $currentUatRoot = Join-Path $testRoot 'current-uat'
+    foreach ($project in $projects) {
+        $metadataDirectory = Join-Path $currentUatRoot "$project\.deployment"
+        New-Item -ItemType Directory -Path $metadataDirectory -Force | Out-Null
+        [ordered]@{release_id='2026-08-02.4';environment='UAT';project=$project;git_sha=('a'*40)} |
+            ConvertTo-Json | Set-Content -LiteralPath (Join-Path $metadataDirectory 'current-release.json') -Encoding UTF8
+    }
+    Assert-Equal '2026-08-02.4' (Get-D365CurrentUatReleaseId -UatRoot $currentUatRoot) 'Common UAT release was not selected.'
+    $mismatchedPath = Join-Path $currentUatRoot 'finance_report\.deployment\current-release.json'
+    $mismatched = Get-Content -LiteralPath $mismatchedPath -Raw | ConvertFrom-Json
+    $mismatched.release_id = '2026-08-02.3'
+    $mismatched | ConvertTo-Json | Set-Content -LiteralPath $mismatchedPath -Encoding UTF8
+    try {
+        Get-D365CurrentUatReleaseId -UatRoot $currentUatRoot | Out-Null
+        throw 'Mismatched UAT releases were accepted.'
+    } catch {
+        if ($_.Exception.Message -notmatch 'คนละ Release') { throw }
     }
 }
 finally {

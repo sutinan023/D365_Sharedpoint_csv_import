@@ -124,3 +124,45 @@ function Assert-D365Approval {
         throw "Release approval phrase did not match. Expected: $Expected"
     }
 }
+
+function Get-D365NextReleaseId {
+    param(
+        [Parameter(Mandatory = $true)][string] $ReleaseRoot,
+        [Parameter(Mandatory = $true)][datetime] $Now
+    )
+
+    $prefix = $Now.ToString('yyyy-MM-dd')
+    $numbers = [Collections.Generic.List[int]]::new()
+    if (Test-Path -LiteralPath $ReleaseRoot -PathType Container) {
+        foreach ($file in Get-ChildItem -LiteralPath $ReleaseRoot -File -Filter "$prefix.*.json") {
+            if ($file.BaseName -notmatch ('^' + [regex]::Escape($prefix) + '\.(\d+)$')) { continue }
+            $number = 0
+            if ([int]::TryParse($matches[1], [ref] $number)) { $numbers.Add($number) }
+        }
+    }
+    $next = if ($numbers.Count -eq 0) { 1 } else { ([int](($numbers | Measure-Object -Maximum).Maximum) + 1) }
+    return "$prefix.$next"
+}
+
+function Get-D365CurrentUatReleaseId {
+    param([Parameter(Mandatory = $true)][string] $UatRoot)
+
+    $releaseIds = [Collections.Generic.List[string]]::new()
+    foreach ($project in $script:D365ProjectNames) {
+        $path = Join-Path $UatRoot "$project\.deployment\current-release.json"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+            throw "ไม่พบข้อมูล Release ของ UAT: $project"
+        }
+        $value = (Read-D365StrictJsonSnapshot -Path $path -Label "UAT release metadata for $project").Value
+        if ([string] $value.environment -cne 'UAT' -or [string] $value.project -cne $project) {
+            throw "ข้อมูล Release ของ UAT ไม่ตรงโปรเจกต์: $project"
+        }
+        $releaseId = [string] $value.release_id
+        if ($releaseId -notmatch '^[A-Za-z0-9._-]+$') { throw "Release ID ของ UAT ไม่ถูกต้อง: $project" }
+        $releaseIds.Add($releaseId)
+    }
+    if (@($releaseIds | Select-Object -Unique).Count -ne 1) {
+        throw 'UAT ทั้งสามโปรเจกต์ใช้คนละ Release'
+    }
+    return $releaseIds[0]
+}
