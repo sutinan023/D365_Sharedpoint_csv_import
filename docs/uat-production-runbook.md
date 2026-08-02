@@ -19,7 +19,8 @@
 
 ทุกจุดยืนยัน ให้ตรวจ Environment, Release ID และรายการไฟล์บนหน้าจอ แล้วตอบ `Y` เพื่อ
 ดำเนินการต่อ หรือ `N` เพื่อยกเลิก คำตอบที่ไม่ใช่ `Y`/`N` จะถูกถามใหม่ `N` ยกเลิกอย่าง
-ปลอดภัย และ Production จะยังไม่เปลี่ยนแปลงจนกว่าคำยืนยันก่อนดำเนินการทุกข้อจะเป็น `Y`
+ปลอดภัย ไฟล์และฐานข้อมูล Production จะไม่เปลี่ยนจนกว่าคำยืนยันที่เกี่ยวข้องจะเป็น `Y`;
+แต่ใน Migration ระบบอาจหยุด Production Task ชั่วคราวเพื่อเตรียม rehearsal ก่อนถาม `Y`/`N` ครั้งสุดท้าย
 
 ## เมื่อพบ Operational
 
@@ -34,7 +35,7 @@ Production
 ## เมื่อพบ Migration
 
 Migration คือไฟล์ SQL ใน `database/migrations` และเป็นคนละขั้นกับ Operational ระบบจะหยุด
-Production Task, สร้าง checkpoint และแสดงชื่อฐาน rehearsal กับ path ของไฟล์ `.sanitized.sql`
+Production Task ชั่วคราว, สร้าง checkpoint และแสดงชื่อฐาน rehearsal กับ path ของไฟล์ `.sanitized.sql`
 
 1. เปิด phpMyAdmin สร้างฐานตามชื่อ rehearsal ที่แสดง ห้ามเลือก `D365_finance` หรือ
    `D365_finance_prod`

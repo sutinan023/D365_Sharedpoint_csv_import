@@ -16,7 +16,8 @@ Production; เมนู `3` ใช้ตรวจสอบและเปรี
 
 ตอบ `Y` เพื่อดำเนินการต่อ หรือ `N` เพื่อยกเลิก ทุกคำถามยืนยันรับเฉพาะ `Y`/`N`;
 คำตอบอื่นจะถามใหม่ และ `N` ยกเลิกอย่างปลอดภัยโดยไม่ไปยังขั้นถัดไป
-Production จะไม่เปลี่ยนแปลงจนกว่าคำยืนยันก่อนดำเนินการทุกข้อจะเป็น `Y`
+ไฟล์และฐานข้อมูล Production จะไม่เปลี่ยนจนกว่าคำยืนยันที่เกี่ยวข้องจะเป็น `Y`; แต่ใน
+Migration ระบบอาจหยุด Production Task ชั่วคราวเพื่อเตรียม rehearsal ก่อนถาม `Y`/`N` ครั้งสุดท้าย
 
 ## Operational และ Migration
 
@@ -26,8 +27,8 @@ Production จะไม่เปลี่ยนแปลงจนกว่าค
 Production
 
 **Migration** คือ Release ที่มีไฟล์ SQL ใน `database/migrations` ซึ่งต้อง checkpoint,
-สร้างและ Import ฐาน rehearsal ตามชื่อฐานและ path ที่ตัวช่วยแสดง แล้วจึงตอบ `Y` เมื่อ
-ตรวจ rehearsal ผ่าน หากตอบ `N` ที่ Migration ระบบจะคืนสถานะเฉพาะ Production Task ที่
+หยุด Production Task ชั่วคราว และสร้าง/Import ฐาน rehearsal ตามชื่อฐานและ path ที่ตัวช่วยแสดง
+แล้วจึงตอบ `Y` เมื่อตรวจ rehearsal ผ่าน หากตอบ `N` ที่ Migration ระบบจะคืนสถานะเฉพาะ Production Task ที่
 ก่อนหน้านี้เปิดใช้งานอยู่; Task ที่เดิมปิดอยู่จะยังปิดอยู่ และจะไม่มีการ Apply migration
 หรือ deploy Production
 
