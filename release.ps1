@@ -48,6 +48,15 @@ function Read-WizardAnswer([string] $Prompt) {
     return Read-Host $Prompt
 }
 
+function Read-WizardConfirmation([string] $Prompt) {
+    while ($true) {
+        $answer = ([string] (Read-WizardAnswer "$Prompt [Y/N]")).Trim()
+        if ($answer -ieq 'Y') { return $true }
+        if ($answer -ieq 'N') { return $false }
+        Write-Output 'กรุณาตอบ Y หรือ N เท่านั้น'
+    }
+}
+
 function New-AutomaticReleaseManifest {
     for ($attempt = 0; $attempt -lt 20; $attempt++) {
         $candidate = Get-D365NextReleaseId -ReleaseRoot $ReleaseRoot -Now $WizardNow
@@ -181,9 +190,10 @@ function Invoke-DeployUAT {
     $actualApproval = $ApprovalToken
     if ([string]::IsNullOrWhiteSpace($actualApproval)) {
         if ($interactiveMenu) {
-            $thaiApproval = "ยืนยันอัปเดต UAT $ReleaseId"
-            $actualThaiApproval = Read-WizardAnswer "พิมพ์ $thaiApproval"
-            if ($actualThaiApproval -cne $thaiApproval) { throw 'ข้อความยืนยันอัปเดต UAT ไม่ถูกต้อง' }
+            if (-not (Read-WizardConfirmation "ยืนยันอัปเดต UAT Release $ReleaseId หรือไม่?")) {
+                Write-Output "ยกเลิกการอัปเดต UAT Release $ReleaseId"
+                return
+            }
             $actualApproval = $expectedApproval
         } else {
             $actualApproval = Read-Host "พิมพ์ $expectedApproval เพื่อยืนยัน"

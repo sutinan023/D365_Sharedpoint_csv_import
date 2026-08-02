@@ -22,6 +22,8 @@ foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT ผ่
 foreach ($removedPrompt in @('ระบุ path ของ checkpoint manifest','ระบุ path ของ restore-approved receipt')) {
     Assert-True (-not $releaseScriptText.Contains($removedPrompt)) "Old technical prompt is still visible: $removedPrompt"
 }
+Assert-True (-not $releaseScriptText.Contains('พิมพ์ $thaiApproval')) `
+    'Interactive UAT deployment still expects the former Thai typed approval.'
 
 function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
     try { & $Action; throw 'Expected failure.' } catch {
@@ -91,6 +93,45 @@ try {
     }
     Assert-True (@($wizardOutput | Where-Object { [string]$_ -match '2026-08-02\.1' }).Count -gt 0) 'Wizard did not generate the next release ID.'
     Assert-True (-not (Test-Path -LiteralPath (Join-Path $releaseRoot '2026-08-02.1.json'))) 'Wizard PlanOnly created a manifest.'
+
+    $answers = [Collections.Generic.Queue[string]]::new()
+    $answers.Enqueue('1')
+    $answers.Enqueue('maybe')
+    $answers.Enqueue(' y ')
+    $prompts = [Collections.Generic.List[string]]::new()
+    $input = {
+        param([string] $Prompt)
+        $prompts.Add($Prompt)
+        $answers.Dequeue()
+    }.GetNewClosure()
+    $uatWizardOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -LocalTestMode `
+        -WizardNow ([datetime]'2026-08-02') -WizardInputAdapter $input 6>&1)
+    Assert-True (@($prompts | Where-Object { $_ -match '\[Y/N\]' }).Count -eq 2) `
+        'Invalid Y/N answer was not asked again.'
+    Assert-True (@($uatWizardOutput | Where-Object { [string]$_ -match 'Deploy UAT release 2026-08-02\.1 สำเร็จ' }).Count -eq 1) `
+        'Interactive UAT deployment did not finish in LocalTestMode.'
+
+    $metadataBeforeCancellation = [ordered]@{}
+    foreach ($project in $projects) {
+        $metadataPath = Join-Path $uatRoot "$project\.deployment\current-release.json"
+        Assert-True (Test-Path -LiteralPath $metadataPath -PathType Leaf) "Interactive UAT deployment did not create metadata: $project"
+        $metadataBeforeCancellation[$project] = Get-Content -LiteralPath $metadataPath -Raw
+    }
+    $cancelAnswers = [Collections.Generic.Queue[string]]::new()
+    $cancelAnswers.Enqueue('1')
+    $cancelAnswers.Enqueue('N')
+    $cancelInput = { param([string] $Prompt) $cancelAnswers.Dequeue() }.GetNewClosure()
+    $cancelOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -LocalTestMode `
+        -WizardNow ([datetime]'2026-08-02') -WizardInputAdapter $cancelInput 6>&1)
+    Assert-True (@($cancelOutput | Where-Object { [string]$_ -match 'ยกเลิกการอัปเดต UAT Release 2026-08-02\.2' }).Count -eq 1) `
+        'N did not cancel the interactive UAT deployment.'
+    foreach ($project in $projects) {
+        $metadataPath = Join-Path $uatRoot "$project\.deployment\current-release.json"
+        Assert-True ((Get-Content -LiteralPath $metadataPath -Raw) -ceq $metadataBeforeCancellation[$project]) `
+            "UAT cancellation changed destination metadata: $project"
+    }
 
     try {
         & $scriptPath -Action DeployUAT -ReleaseId 'bad release id' -SourceParent $sourceParent `
