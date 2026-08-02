@@ -56,6 +56,31 @@ try {
     $audit = Get-Content -Raw -LiteralPath $auditPath | ConvertFrom-Json
     if ($audit.source_sha256 -cne $sourceHash -or $audit.definer_count -ne 2 -or $audit.qualified_reference_count -ne 22) { throw 'Audit receipt is incomplete.' }
 
+    $checkpointPath = Join-Path $testRoot 'checkpoint.json'
+    [ordered]@{
+        database = 'D365_finance'
+        backup_file = $sourcePath
+        sha256 = $sourceHash
+        verification_baseline = [ordered]@{ definer_count=2; qualified_reference_count=22 }
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $checkpointPath -Encoding UTF8
+    $automaticOutputPath = Join-Path $testRoot 'automatic-sanitized.sql'
+    & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash `
+        -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260802_1' `
+        -OutputPath $automaticOutputPath -UseCheckpointBaseline -BackupManifestPath $checkpointPath | Out-Null
+    if (-not (Test-Path -LiteralPath $automaticOutputPath -PathType Leaf)) { throw 'Checkpoint baseline mode did not create sanitized SQL.' }
+    $automaticAudit = Get-Content -Raw -LiteralPath "$automaticOutputPath.audit.json" | ConvertFrom-Json
+    if ($automaticAudit.checkpoint_manifest_sha256 -cne (Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256).Hash.ToLowerInvariant()) {
+        throw 'Sanitizer audit did not bind the checkpoint manifest.'
+    }
+
+    $badCheckpointPath = Join-Path $testRoot 'bad-checkpoint.json'
+    $badCheckpoint = Get-Content -LiteralPath $checkpointPath -Raw | ConvertFrom-Json
+    $badCheckpoint.verification_baseline.definer_count = 1
+    $badCheckpoint | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $badCheckpointPath -Encoding UTF8
+    $badAutomaticOutput = Join-Path $testRoot 'bad-automatic-sanitized.sql'
+    Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260802_1' -OutputPath $badAutomaticOutput -UseCheckpointBaseline -BackupManifestPath $badCheckpointPath } 'definer'
+    if (Test-Path -LiteralPath $badAutomaticOutput) { throw 'Failed checkpoint baseline mode left sanitized SQL behind.' }
+
     $lowercaseSourcePath = Join-Path $testRoot 'lowercase-source.sql'
     $lowercaseOutputPath = Join-Path $testRoot 'lowercase-sanitized.sql'
     [IO.File]::WriteAllText($lowercaseSourcePath, (Get-TestDump -DatabaseName 'd365_finance'), (New-Object Text.UTF8Encoding($false)))

@@ -15,16 +15,16 @@ param(
     [Parameter(Mandatory = $true)]
     [string] $OutputPath,
 
-    [Parameter(Mandatory = $true)]
-    [ValidateRange(0, [int]::MaxValue)]
-    [int] $ExpectedDefinerCount,
+    [Nullable[int]] $ExpectedDefinerCount,
 
-    [Parameter(Mandatory = $true)]
-    [ValidateRange(0, [int]::MaxValue)]
-    [int] $ExpectedQualifiedReferenceCount
+    [Nullable[int]] $ExpectedQualifiedReferenceCount,
+
+    [switch] $UseCheckpointBaseline,
+    [string] $BackupManifestPath
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'release_security.ps1')
 
 function Assert-SafeDatabaseName {
     param([string] $Name, [string] $Label)
@@ -91,6 +91,31 @@ $sourceBytes = [IO.File]::ReadAllBytes($sourceFullPath)
 $actualSourceHash = Get-Sha256Hex -Bytes $sourceBytes
 if ($actualSourceHash -cne $ExpectedSourceSha256.ToLowerInvariant()) {
     throw 'Source backup hash does not match the expected SHA-256 value.'
+}
+$checkpointManifestHash = $null
+if ($UseCheckpointBaseline) {
+    if ([string]::IsNullOrWhiteSpace($BackupManifestPath) -or -not (Test-Path -LiteralPath $BackupManifestPath -PathType Leaf)) {
+        throw 'Checkpoint baseline mode requires BackupManifestPath.'
+    }
+    $checkpointSnapshot = Read-D365StrictJsonSnapshot -Path $BackupManifestPath -Label 'Checkpoint manifest'
+    $checkpoint = $checkpointSnapshot.Value
+    if ([string] $checkpoint.database -cne $SourceDatabase -or
+        [IO.Path]::GetFullPath([string] $checkpoint.backup_file) -ine $sourceFullPath -or
+        [string] $checkpoint.sha256 -ine $actualSourceHash) {
+        throw 'Checkpoint manifest does not bind the source backup.'
+    }
+    $baseline = $checkpoint.verification_baseline
+    if ($null -eq $baseline -or $baseline.definer_count -isnot [int] -or
+        $baseline.qualified_reference_count -isnot [int] -or
+        $baseline.definer_count -lt 0 -or $baseline.qualified_reference_count -lt 0) {
+        throw 'Checkpoint verification baseline counts are invalid.'
+    }
+    $ExpectedDefinerCount = [int] $baseline.definer_count
+    $ExpectedQualifiedReferenceCount = [int] $baseline.qualified_reference_count
+    $checkpointManifestHash = $checkpointSnapshot.Hash
+} elseif ($null -eq $ExpectedDefinerCount -or $null -eq $ExpectedQualifiedReferenceCount -or
+          $ExpectedDefinerCount -lt 0 -or $ExpectedQualifiedReferenceCount -lt 0) {
+    throw 'Explicit nonnegative counts or UseCheckpointBaseline are required.'
 }
 try {
 $sourceText = (New-Object Text.UTF8Encoding($false, $true)).GetString($sourceBytes)
@@ -350,6 +375,7 @@ $audit = [ordered]@{
     sanitized_size_bytes = (Get-Item -LiteralPath $outputFullPath).Length
     definer_count = $definerCount
     qualified_reference_count = $qualifiedReferenceCount
+    checkpoint_manifest_sha256 = $checkpointManifestHash
 }
 [IO.File]::WriteAllText($auditFullPath, ($audit | ConvertTo-Json -Depth 4), $utf8WithoutBom)
 Write-Output $outputFullPath
