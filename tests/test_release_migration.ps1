@@ -9,10 +9,12 @@ function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
 }
 
 $expectedOrder = @(
-    'validate-uat-ledger', 'disable-production-tasks', 'checkpoint-production',
-    'prepare-rehearsal', 'restore-rehearsal', 'verify-rehearsal',
-    'approve-rehearsal', 'approve-production-migration', 'apply-production',
-    'apply-production-idempotence-check', 'verify-production'
+    'disable-production-tasks', 'checkpoint-production', 'prepare-rehearsal',
+    'show-manual-restore-instructions', 'wait-for-manual-restore',
+    'verify-rehearsal-read-only', 'approve-rehearsal-automatically',
+    'approve-production-migration', 'apply-production',
+    'apply-production-idempotence-check', 'verify-production',
+    'restore-production-task-states'
 )
 
 function New-TestAdapter {
@@ -24,9 +26,13 @@ function New-TestAdapter {
         switch ($Stage) {
             'disable-production-tasks' { return [pscustomobject]@{ Success=$true; PreviouslyEnabledTasks=@('Import A') } }
             'checkpoint-production' { return [pscustomobject]@{ Success=$true; BackupManifestPath='checkpoint.json' } }
-            'approve-rehearsal' { return [pscustomobject]@{ Success=$true; RestoreReceiptPath='restore-approved.json' } }
+            'prepare-rehearsal' { return [pscustomobject]@{ Success=$true; RehearsalDatabase='D365_finance_prod_rehearsal_r1'; SanitizedPath='sanitized.sql'; SanitizerAuditPath='sanitized.sql.audit.json' } }
+            'show-manual-restore-instructions' { return [pscustomobject]@{ Success=$true; RehearsalDatabase='D365_finance_prod_rehearsal_r1'; SanitizedPath='sanitized.sql' } }
+            'verify-rehearsal-read-only' { return [pscustomobject]@{ Success=$true; RestoreEvidencePath='restore-evidence.json' } }
+            'approve-rehearsal-automatically' { return [pscustomobject]@{ Success=$true; RestoreReceiptPath='restore-approved.json' } }
             'apply-production' { return [pscustomobject]@{ Success=$true; Applied=@('006_test.sql') } }
             'apply-production-idempotence-check' { return [pscustomobject]@{ Success=$true; Applied=@() } }
+            'restore-production-task-states' { return [pscustomobject]@{ Success=$true; RestoredTasks=@('Import A') } }
             default { return [pscustomobject]@{ Success=$true } }
         }
     }.GetNewClosure()
@@ -36,10 +42,30 @@ $stages = [Collections.Generic.List[string]]::new()
 $result = Invoke-D365MigrationPromotion -ReleaseId 'r1' -ManifestPath 'manifest.json' `
     -ProjectRoot 'project' -BackupRoot 'backup' -TaskNames @('Import A') `
     -ApprovalToken 'APPLY MIGRATION r1' -CommandAdapter (New-TestAdapter -Stages $stages)
-Assert-True (($stages -join "`n") -ceq ($expectedOrder -join "`n")) 'Migration stage order is wrong.'
 Assert-True ($result.TasksRemainDisabled -eq $true) 'Tasks must remain disabled until code/config/smoke verification succeeds.'
 Assert-True (@($result.FirstApply.Applied).Count -eq 1) 'First apply result was lost.'
 Assert-True (@($result.SecondApply.Applied).Count -eq 0) 'Idempotence result was lost.'
+$instructionNames = @($result.Instructions.PSObject.Properties.Name | Where-Object { $_ -cne 'Success' } | Sort-Object)
+Assert-True ($instructionNames.Count -eq 2 -and $instructionNames -contains 'RehearsalDatabase' -and
+    $instructionNames -contains 'SanitizedPath') 'Manual instructions exposed internal artifacts.'
+$completed = Complete-D365MigrationPromotion -MigrationResult $result `
+    -CommandAdapter (New-TestAdapter -Stages $stages) -ProductionDeployVerified
+Assert-True (($stages -join "`n") -ceq ($expectedOrder -join "`n")) 'Migration stage order is wrong.'
+Assert-True ($completed.TasksRemainDisabled -eq $false) 'Tasks were not restored after Production verification.'
+
+$providerStages = [Collections.Generic.List[string]]::new()
+$approvalProvider = {
+    param([string] $ReleaseId)
+    $providerStages.Add('request-migration-approval')
+    return "APPLY MIGRATION $ReleaseId"
+}.GetNewClosure()
+Invoke-D365MigrationPromotion -ReleaseId 'r1' -ManifestPath 'manifest.json' -ProjectRoot 'project' `
+    -BackupRoot 'backup' -TaskNames @('Import A') -ApprovalProvider $approvalProvider `
+    -CommandAdapter (New-TestAdapter -Stages $providerStages) | Out-Null
+$approvalIndex = $providerStages.IndexOf('request-migration-approval')
+Assert-True ($approvalIndex -gt $providerStages.IndexOf('approve-rehearsal-automatically') -and
+    $approvalIndex -lt $providerStages.IndexOf('approve-production-migration')) `
+    'Migration confirmation was not requested immediately before Production apply approval.'
 
 $wrongApprovalStages = [Collections.Generic.List[string]]::new()
 Assert-Throws {
@@ -49,7 +75,7 @@ Assert-Throws {
 } 'approval'
 Assert-True ($wrongApprovalStages -notcontains 'apply-production') 'Incorrect approval reached Production apply.'
 
-foreach ($failureStage in @('restore-rehearsal', 'verify-rehearsal', 'approve-rehearsal', 'apply-production', 'apply-production-idempotence-check', 'verify-production')) {
+foreach ($failureStage in @('prepare-rehearsal', 'show-manual-restore-instructions', 'wait-for-manual-restore', 'verify-rehearsal-read-only', 'approve-rehearsal-automatically', 'apply-production', 'apply-production-idempotence-check', 'verify-production')) {
     $failureStages = [Collections.Generic.List[string]]::new()
     Assert-Throws {
         Invoke-D365MigrationPromotion -ReleaseId 'r1' -ManifestPath 'manifest.json' -ProjectRoot 'project' `
@@ -64,6 +90,8 @@ $badIdempotenceAdapter = {
     param([string] $Stage, [hashtable] $Context)
     $badIdempotenceStages.Add($Stage)
     if ($Stage -ceq 'disable-production-tasks') { return [pscustomobject]@{ Success=$true; PreviouslyEnabledTasks=@('Import A') } }
+    if ($Stage -ceq 'prepare-rehearsal') { return [pscustomobject]@{ Success=$true; RehearsalDatabase='D365_finance_prod_rehearsal_r1'; SanitizedPath='sanitized.sql'; SanitizerAuditPath='sanitized.sql.audit.json' } }
+    if ($Stage -ceq 'show-manual-restore-instructions') { return [pscustomobject]@{ Success=$true; RehearsalDatabase='D365_finance_prod_rehearsal_r1'; SanitizedPath='sanitized.sql' } }
     if ($Stage -ceq 'apply-production') { return [pscustomobject]@{ Success=$true; Applied=@('006.sql') } }
     if ($Stage -ceq 'apply-production-idempotence-check') { return [pscustomobject]@{ Success=$true; Applied=@('006.sql') } }
     return [pscustomobject]@{ Success=$true }

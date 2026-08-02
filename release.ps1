@@ -18,8 +18,6 @@
     [string] $PhpPath = 'C:\xampp\php\php.exe',
     [string] $MigrationApprovalToken,
     [string] $MigrationBackupRoot = 'C:\xampp\backups\d365',
-    [string] $MigrationBackupManifestPath,
-    [string] $MigrationRestoreReceiptPath,
     [string] $MigrationAppliedBy = $env:USERNAME,
     [string[]] $ProductionTaskNames = @(
         'D365 SharePoint CSV Import [PROD]',
@@ -320,7 +318,14 @@ function Invoke-PromoteProduction {
         $expectedAcceptance = "APPROVE UAT RESULT $ReleaseId"
         $actualAcceptance = $UatAcceptanceToken
         if ([string]::IsNullOrWhiteSpace($actualAcceptance)) {
-            $actualAcceptance = Read-Host "พิมพ์ $expectedAcceptance หลังผู้ใช้รับรอง UAT"
+            if ($interactiveMenu) {
+                $thaiAcceptance = "ยืนยันว่าทดสอบ UAT ผ่าน $ReleaseId"
+                $answer = Read-WizardAnswer "พิมพ์ $thaiAcceptance"
+                if ($answer -cne $thaiAcceptance) { throw 'ข้อความยืนยันผลทดสอบ UAT ไม่ถูกต้อง' }
+                $actualAcceptance = $expectedAcceptance
+            } else {
+                $actualAcceptance = Read-Host "พิมพ์ $expectedAcceptance หลังผู้ใช้รับรอง UAT"
+            }
         }
         Assert-D365Approval -Expected $expectedAcceptance -Actual $actualAcceptance
         $UatApprovalPath = (& (Join-Path $toolRoot 'approve_uat_release.ps1') -ManifestPath $release.Path `
@@ -338,26 +343,43 @@ function Invoke-PromoteProduction {
     $migrationResult = $null
     if ($migrationProjects.Count -gt 0) {
         if ($null -eq $MigrationCommandAdapter) {
-            if ($interactiveMenu -and [string]::IsNullOrWhiteSpace($MigrationBackupManifestPath)) {
-                $MigrationBackupManifestPath = Read-Host 'ระบุ path ของ checkpoint manifest (.sql.json)'
+            if ($LocalTestMode) {
+                throw 'LocalTestMode migration requires MigrationCommandAdapter and will not access real tasks or databases.'
             }
-            if ($interactiveMenu -and [string]::IsNullOrWhiteSpace($MigrationRestoreReceiptPath)) {
-                $MigrationRestoreReceiptPath = Read-Host 'ระบุ path ของ restore-approved receipt (.json)'
-            }
-            if ([string]::IsNullOrWhiteSpace($MigrationBackupManifestPath) -or [string]::IsNullOrWhiteSpace($MigrationRestoreReceiptPath)) {
-                throw 'Migration release requires -MigrationBackupManifestPath and -MigrationRestoreReceiptPath after the manual Restore rehearsal. No Production change was made.'
-            }
+            $waitForManualRestore = {
+                param([string] $RehearsalDatabase, [string] $SanitizedPath)
+                [void] (Read-WizardAnswer 'กด Enter หลัง Import สำเร็จ')
+            }.GetNewClosure()
             $MigrationCommandAdapter = New-D365ManualRestoreMigrationAdapter -Manifest $release.Manifest `
                 -SourceProjects $sourceProjects -ProductionRoot $ProductionRoot `
-                -BackupManifestPath $MigrationBackupManifestPath -RestoreReceiptPath $MigrationRestoreReceiptPath `
-                -PhpPath $PhpPath -AppliedBy $MigrationAppliedBy
+                -BackupRoot $MigrationBackupRoot -PhpPath $PhpPath -AppliedBy $MigrationAppliedBy `
+                -WaitForManualRestore $waitForManualRestore
         }
+        $migrationApprovalProvider = $null
         if ([string]::IsNullOrWhiteSpace($MigrationApprovalToken)) {
-            $MigrationApprovalToken = Read-Host "พิมพ์ APPLY MIGRATION $ReleaseId หลัง Restore rehearsal ผ่าน"
+            $migrationApprovalProvider = if ($interactiveMenu) {
+                {
+                    param([string] $ApprovedReleaseId)
+                    $thaiMigrationApproval = "ยืนยันใช้ MIGRATION $ApprovedReleaseId"
+                    $answer = Read-WizardAnswer "พิมพ์ $thaiMigrationApproval"
+                    if ($answer -cne $thaiMigrationApproval) { throw 'ข้อความยืนยัน Migration ไม่ถูกต้อง' }
+                    return "APPLY MIGRATION $ApprovedReleaseId"
+                }.GetNewClosure()
+            } else {
+                {
+                    param([string] $ApprovedReleaseId)
+                    Read-Host "พิมพ์ APPLY MIGRATION $ApprovedReleaseId หลัง Restore rehearsal ผ่าน"
+                }
+            }
         }
-        $migrationResult = Invoke-D365MigrationPromotion -ReleaseId $ReleaseId -ManifestPath $release.Path `
-            -ProjectRoot $sourceProjects.D365_Sharedpoint_csv_import.SourceRoot -BackupRoot $MigrationBackupRoot `
-            -TaskNames $ProductionTaskNames -ApprovalToken $MigrationApprovalToken -CommandAdapter $MigrationCommandAdapter
+        $migrationArguments = @{
+            ReleaseId=$ReleaseId; ManifestPath=$release.Path
+            ProjectRoot=$sourceProjects.D365_Sharedpoint_csv_import.SourceRoot; BackupRoot=$MigrationBackupRoot
+            TaskNames=$ProductionTaskNames; ApprovalToken=$MigrationApprovalToken
+            CommandAdapter=$MigrationCommandAdapter
+        }
+        if ($null -ne $migrationApprovalProvider) { $migrationArguments.ApprovalProvider = $migrationApprovalProvider }
+        $migrationResult = Invoke-D365MigrationPromotion @migrationArguments
     }
 
     foreach ($project in $script:D365ProjectNames) {
@@ -375,7 +397,14 @@ function Invoke-PromoteProduction {
     $expectedProductionApproval = "APPROVE PRODUCTION $ReleaseId"
     $actualProductionApproval = $ProductionApprovalToken
     if ([string]::IsNullOrWhiteSpace($actualProductionApproval)) {
-        $actualProductionApproval = Read-Host "พิมพ์ $expectedProductionApproval เพื่อยืนยัน"
+        if ($interactiveMenu) {
+            $thaiProductionApproval = "ยืนยันนำขึ้น PRODUCTION $ReleaseId"
+            $answer = Read-WizardAnswer "พิมพ์ $thaiProductionApproval"
+            if ($answer -cne $thaiProductionApproval) { throw 'ข้อความยืนยัน Production ไม่ถูกต้อง' }
+            $actualProductionApproval = $expectedProductionApproval
+        } else {
+            $actualProductionApproval = Read-Host "พิมพ์ $expectedProductionApproval เพื่อยืนยัน"
+        }
     }
     Assert-D365Approval -Expected $expectedProductionApproval -Actual $actualProductionApproval
 

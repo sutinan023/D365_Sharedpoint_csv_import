@@ -6,15 +6,25 @@ function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
         if ($_.Exception.Message -eq 'Expected failure.' -or $_.Exception.Message -notmatch $Pattern) { throw }
     }
 }
+function Assert-True([bool] $Condition, [string] $Message) { if (-not $Condition) { throw $Message } }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('manual-migration-adapter-{0}' -f [guid]::NewGuid())
 try {
     New-Item -ItemType Directory -Path $root | Out-Null
-    $backup = Join-Path $root 'checkpoint.json'
-    $receipt = Join-Path $root 'restore-approved.json'
+    $backupSql = Join-Path $root 'D365_finance_prod_r1.sql'
+    [IO.File]::WriteAllText($backupSql, 'CREATE TABLE `fixture` (`id` int);', (New-Object Text.UTF8Encoding($false)))
+    $backupHash = (Get-FileHash -LiteralPath $backupSql -Algorithm SHA256).Hash.ToLowerInvariant()
+    $checkpointPath = "$backupSql.json"
+    [ordered]@{
+        database='D365_finance_prod';release_id='r1';backup_file=$backupSql;sha256=$backupHash
+        verification_baseline=[ordered]@{definer_count=0;qualified_reference_count=0}
+    } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $checkpointPath -Encoding UTF8
+    $prepared = Start-D365ManualRestoreWizard -ReleaseId 'r1' -BackupManifestPath $checkpointPath
+    Assert-True ($prepared.RehearsalDatabase -ceq 'D365_finance_prod_rehearsal_r1') 'Automatic rehearsal database name is wrong.'
+    Assert-True (Test-Path -LiteralPath $prepared.SanitizedPath -PathType Leaf) 'Automatic sanitized SQL was not created.'
+    Assert-True (Test-Path -LiteralPath $prepared.SanitizerAuditPath -PathType Leaf) 'Automatic sanitizer audit was not created.'
+
     $php = Join-Path $root 'php.exe'
-    Set-Content -LiteralPath $backup '{}'
-    Set-Content -LiteralPath $receipt '{}'
     Set-Content -LiteralPath $php 'fixture'
     $projects = [ordered]@{}
     foreach ($project in @('D365_Sharedpoint_csv_import','D365_file_csv_import','finance_report')) {
@@ -25,19 +35,28 @@ try {
     $manifest = [pscustomobject]@{release_id='r1';migrations=[pscustomobject]@{
         D365_Sharedpoint_csv_import=@('006.sql');D365_file_csv_import=@();finance_report=@()
     }}
+    $waitEvents = [Collections.Generic.List[string]]::new()
+    $wait = { param([string]$Database,[string]$Path) $waitEvents.Add("$Database|$Path") }.GetNewClosure()
     $adapter = New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
-        -ProductionRoot (Join-Path $root 'prod') -BackupManifestPath $backup `
-        -RestoreReceiptPath $receipt -PhpPath $php -AppliedBy 'tester'
+        -ProductionRoot (Join-Path $root 'prod') -BackupRoot (Join-Path $root 'backup') `
+        -PhpPath $php -AppliedBy 'tester' -WaitForManualRestore $wait
     if ($adapter -isnot [scriptblock]) { throw 'Manual restore adapter was not created.' }
+    $context = @{RehearsalDatabase='D365_finance_prod_rehearsal_r1';SanitizedPath=(Join-Path $root 'sanitized.sql')}
+    $instructions = & $adapter 'show-manual-restore-instructions' $context
+    $userKeys = @($instructions.PSObject.Properties.Name | Where-Object { $_ -cne 'Success' })
+    Assert-True ($userKeys.Count -eq 2 -and $userKeys -contains 'RehearsalDatabase' -and $userKeys -contains 'SanitizedPath') `
+        'Manual restore instructions exposed internal artifacts.'
+    & $adapter 'wait-for-manual-restore' $context | Out-Null
+    Assert-True ($waitEvents.Count -eq 1) 'Manual restore wait callback was not invoked.'
     Assert-Throws {
         New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
-            -ProductionRoot (Join-Path $root 'prod') -BackupManifestPath (Join-Path $root 'missing.json') `
-            -RestoreReceiptPath $receipt -PhpPath $php -AppliedBy 'tester' | Out-Null
+            -ProductionRoot (Join-Path $root 'prod') -BackupRoot (Join-Path $root 'backup') `
+            -PhpPath (Join-Path $root 'missing-php.exe') -AppliedBy 'tester' -WaitForManualRestore $wait | Out-Null
     } 'not found'
     Assert-Throws {
         New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
-            -ProductionRoot (Join-Path $root 'prod') -BackupManifestPath $backup `
-            -RestoreReceiptPath $receipt -PhpPath $php -AppliedBy 'bad user;argument' | Out-Null
+            -ProductionRoot (Join-Path $root 'prod') -BackupRoot (Join-Path $root 'backup') `
+            -PhpPath $php -AppliedBy 'bad user;argument' -WaitForManualRestore $wait | Out-Null
     } 'unsafe'
 }
 finally {

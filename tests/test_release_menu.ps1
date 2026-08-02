@@ -15,6 +15,13 @@ $releaseScriptBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $script
 Assert-True ($releaseScriptBytes.Length -ge 3 -and $releaseScriptBytes[0] -eq 0xEF -and
     $releaseScriptBytes[1] -eq 0xBB -and $releaseScriptBytes[2] -eq 0xBF) `
     'release.ps1 must use UTF-8 BOM so Windows PowerShell 5.1 parses Thai text correctly.'
+$releaseScriptText = [Text.Encoding]::UTF8.GetString($releaseScriptBytes)
+foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT ผ่าน','ยืนยันใช้ MIGRATION','ยืนยันนำขึ้น PRODUCTION','กด Enter หลัง Import สำเร็จ')) {
+    Assert-True ($releaseScriptText.Contains($thaiPrompt)) "Thai confirmation is missing: $thaiPrompt"
+}
+foreach ($removedPrompt in @('ระบุ path ของ checkpoint manifest','ระบุ path ของ restore-approved receipt')) {
+    Assert-True (-not $releaseScriptText.Contains($removedPrompt)) "Old technical prompt is still visible: $removedPrompt"
+}
 
 function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
     try { & $Action; throw 'Expected failure.' } catch {
@@ -263,7 +270,7 @@ try {
     Assert-Throws {
         & $scriptPath @migrationPromotion -ApprovalAuditRoot $auditRoot `
             -UatAcceptanceToken "APPROVE UAT RESULT $migrationReleaseId" | Out-Null
-    } 'MigrationBackupManifestPath'
+    } 'MigrationCommandAdapter'
     $migrationManifestHash = (Get-FileHash -LiteralPath $migrationManifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
     $migrationReceiptPath = Join-Path $auditRoot "uat-approval-$migrationReleaseId-$migrationManifestHash.json"
     $migrationReceiptHash = (Get-FileHash -LiteralPath $migrationReceiptPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -274,6 +281,10 @@ try {
         $migrationStages.Add($Stage)
         switch ($Stage) {
             'disable-production-tasks' { [pscustomobject]@{Success=$true;PreviouslyEnabledTasks=@('Import A')} }
+            'prepare-rehearsal' { [pscustomobject]@{Success=$true;RehearsalDatabase="D365_finance_prod_rehearsal_$($migrationReleaseId.Replace('-','_').Replace('.','_'))";SanitizedPath='sanitized.sql';SanitizerAuditPath='sanitized.sql.audit.json'} }
+            'show-manual-restore-instructions' { [pscustomobject]@{Success=$true;RehearsalDatabase="D365_finance_prod_rehearsal_$($migrationReleaseId.Replace('-','_').Replace('.','_'))";SanitizedPath='sanitized.sql'} }
+            'verify-rehearsal-read-only' { [pscustomobject]@{Success=$true;RestoreEvidencePath='restore-evidence.json'} }
+            'approve-rehearsal-automatically' { [pscustomobject]@{Success=$true;RestoreReceiptPath='restore-approved.json'} }
             'apply-production' { [pscustomobject]@{Success=$true;Applied=@('006_test.sql')} }
             'apply-production-idempotence-check' { [pscustomobject]@{Success=$true;Applied=@()} }
             'restore-production-task-states' { [pscustomobject]@{Success=$true;RestoredTasks=@('Import A')} }

@@ -21,7 +21,8 @@ function Invoke-D365MigrationPromotion {
         [Parameter(Mandatory = $true)][string] $ProjectRoot,
         [Parameter(Mandatory = $true)][string] $BackupRoot,
         [Parameter(Mandatory = $true)][string[]] $TaskNames,
-        [Parameter(Mandatory = $true)][string] $ApprovalToken,
+        [string] $ApprovalToken,
+        [scriptblock] $ApprovalProvider,
         [Parameter(Mandatory = $true)][scriptblock] $CommandAdapter
     )
 
@@ -33,22 +34,36 @@ function Invoke-D365MigrationPromotion {
         TaskNames = @($TaskNames)
     }
 
-    [void] (Invoke-D365MigrationStage 'validate-uat-ledger' $CommandAdapter $context)
     $disabled = Invoke-D365MigrationStage 'disable-production-tasks' $CommandAdapter $context
     $context.PreviouslyEnabledTasks = @($disabled.PreviouslyEnabledTasks)
     $checkpoint = Invoke-D365MigrationStage 'checkpoint-production' $CommandAdapter $context
     if ($checkpoint.PSObject.Properties.Name -contains 'BackupManifestPath') {
         $context.BackupManifestPath = [string] $checkpoint.BackupManifestPath
     }
-    [void] (Invoke-D365MigrationStage 'prepare-rehearsal' $CommandAdapter $context)
-    [void] (Invoke-D365MigrationStage 'restore-rehearsal' $CommandAdapter $context)
-    [void] (Invoke-D365MigrationStage 'verify-rehearsal' $CommandAdapter $context)
-    $rehearsalApproval = Invoke-D365MigrationStage 'approve-rehearsal' $CommandAdapter $context
+    $prepared = Invoke-D365MigrationStage 'prepare-rehearsal' $CommandAdapter $context
+    foreach ($name in @('RehearsalDatabase', 'SanitizedPath', 'SanitizerAuditPath')) {
+        if ($prepared.PSObject.Properties.Name -contains $name) { $context[$name] = [string] $prepared.$name }
+    }
+    $instructions = Invoke-D365MigrationStage 'show-manual-restore-instructions' $CommandAdapter $context
+    $instructionKeys = @($instructions.PSObject.Properties.Name | Where-Object { $_ -cne 'Success' })
+    if ($instructionKeys.Count -ne 2 -or $instructionKeys -notcontains 'RehearsalDatabase' -or
+        $instructionKeys -notcontains 'SanitizedPath') {
+        throw "Manual restore instructions may contain only the rehearsal database and sanitized SQL path. Found: $($instructionKeys -join ',')"
+    }
+    [void] (Invoke-D365MigrationStage 'wait-for-manual-restore' $CommandAdapter $context)
+    $verification = Invoke-D365MigrationStage 'verify-rehearsal-read-only' $CommandAdapter $context
+    if ($verification.PSObject.Properties.Name -contains 'RestoreEvidencePath') {
+        $context.RestoreEvidencePath = [string] $verification.RestoreEvidencePath
+    }
+    $rehearsalApproval = Invoke-D365MigrationStage 'approve-rehearsal-automatically' $CommandAdapter $context
     if ($rehearsalApproval.PSObject.Properties.Name -contains 'RestoreReceiptPath') {
         $context.RestoreReceiptPath = [string] $rehearsalApproval.RestoreReceiptPath
     }
 
     $expectedApproval = "APPLY MIGRATION $ReleaseId"
+    if ([string]::IsNullOrWhiteSpace($ApprovalToken) -and $null -ne $ApprovalProvider) {
+        $ApprovalToken = & $ApprovalProvider $ReleaseId
+    }
     if ($ApprovalToken -cne $expectedApproval) {
         throw "Migration approval phrase did not match. Expected: $expectedApproval"
     }
@@ -67,6 +82,7 @@ function Invoke-D365MigrationPromotion {
     [pscustomobject]@{
         ReleaseId = $ReleaseId
         Checkpoint = $checkpoint
+        Instructions = $instructions
         Rehearsal = $rehearsalApproval
         FirstApply = $firstApply
         SecondApply = $secondApply
