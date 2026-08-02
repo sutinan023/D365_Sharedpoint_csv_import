@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('Menu', 'DeployUAT', 'Compare', 'PromoteProduction')]
     [string] $Action = 'Menu',
 
@@ -27,16 +27,43 @@ param(
         'D365 SharePoint CSV Download Cleanup [PROD]'
     ),
     [scriptblock] $MigrationCommandAdapter,
+    [datetime] $WizardNow = (Get-Date),
+    [scriptblock] $WizardInputAdapter,
     [switch] $PlanOnly,
     [switch] $LocalTestMode
 )
 
 $ErrorActionPreference = 'Stop'
 $interactiveMenu = $Action -ceq 'Menu'
+$automaticReleaseRequested = $false
 $toolRoot = Join-Path $PSScriptRoot 'tools'
 . (Join-Path $toolRoot 'release_common.ps1')
 . (Join-Path $toolRoot 'release_migration.ps1')
 . (Join-Path $toolRoot 'manual_restore_migration_adapter.ps1')
+
+if ($null -ne $WizardInputAdapter -and -not $LocalTestMode) {
+    throw 'WizardInputAdapter ใช้ได้เฉพาะ LocalTestMode'
+}
+
+function Read-WizardAnswer([string] $Prompt) {
+    if ($LocalTestMode -and $null -ne $WizardInputAdapter) { return & $WizardInputAdapter $Prompt }
+    return Read-Host $Prompt
+}
+
+function New-AutomaticReleaseManifest {
+    for ($attempt = 0; $attempt -lt 20; $attempt++) {
+        $candidate = Get-D365NextReleaseId -ReleaseRoot $ReleaseRoot -Now $WizardNow
+        $path = Join-Path $ReleaseRoot "$candidate.json"
+        try {
+            & (Join-Path $toolRoot 'new_release_manifest.ps1') -ReleaseId $candidate `
+                -SourceParent $SourceParent -OutputPath $path | Out-Null
+            return [pscustomobject]@{ ReleaseId=$candidate; ManifestPath=$path }
+        } catch {
+            if ($_.Exception.Message -notmatch 'immutable|already exists') { throw }
+        }
+    }
+    throw 'ไม่สามารถสร้างหมายเลข Release ที่ไม่ซ้ำได้'
+}
 
 function Assert-ReleaseId {
     if ([string]::IsNullOrWhiteSpace($ReleaseId)) {
@@ -112,7 +139,11 @@ function Invoke-EnvironmentComparison {
 }
 
 function Invoke-DeployUAT {
-    Assert-ReleaseId
+    if ($automaticReleaseRequested) {
+        $ReleaseId = Get-D365NextReleaseId -ReleaseRoot $ReleaseRoot -Now $WizardNow
+    } else {
+        Assert-ReleaseId
+    }
     Assert-Directory -Path $UatRoot -Label 'UAT'
     Assert-LocalTestPath -Path $UatRoot -Label 'UAT root'
     Assert-LocalTestPath -Path $ReleaseRoot -Label 'release root'
@@ -132,8 +163,14 @@ function Invoke-DeployUAT {
     if (-not (Test-Path -LiteralPath $ReleaseRoot)) {
         New-Item -ItemType Directory -Path $ReleaseRoot -Force | Out-Null
     }
-    $manifestPath = Join-Path $ReleaseRoot "$ReleaseId.json"
-    & (Join-Path $toolRoot 'new_release_manifest.ps1') -ReleaseId $ReleaseId -SourceParent $SourceParent -OutputPath $manifestPath | Out-Null
+    if ($automaticReleaseRequested) {
+        $automaticRelease = New-AutomaticReleaseManifest
+        $ReleaseId = $automaticRelease.ReleaseId
+        $manifestPath = $automaticRelease.ManifestPath
+    } else {
+        $manifestPath = Join-Path $ReleaseRoot "$ReleaseId.json"
+        & (Join-Path $toolRoot 'new_release_manifest.ps1') -ReleaseId $ReleaseId -SourceParent $SourceParent -OutputPath $manifestPath | Out-Null
+    }
 
     foreach ($project in $script:D365ProjectNames) {
         $entry = $projects[$project]
@@ -145,7 +182,14 @@ function Invoke-DeployUAT {
     $expectedApproval = "APPROVE UAT $ReleaseId"
     $actualApproval = $ApprovalToken
     if ([string]::IsNullOrWhiteSpace($actualApproval)) {
-        $actualApproval = Read-Host "พิมพ์ $expectedApproval เพื่อยืนยัน"
+        if ($interactiveMenu) {
+            $thaiApproval = "ยืนยันอัปเดต UAT $ReleaseId"
+            $actualThaiApproval = Read-WizardAnswer "พิมพ์ $thaiApproval"
+            if ($actualThaiApproval -cne $thaiApproval) { throw 'ข้อความยืนยันอัปเดต UAT ไม่ถูกต้อง' }
+            $actualApproval = $expectedApproval
+        } else {
+            $actualApproval = Read-Host "พิมพ์ $expectedApproval เพื่อยืนยัน"
+        }
     }
     Assert-D365Approval -Expected $expectedApproval -Actual $actualApproval
 
@@ -362,22 +406,25 @@ function Invoke-PromoteProduction {
 }
 
 if ($Action -ceq 'Menu') {
-    Write-Host 'D365 Finance - เมนู Release/Deploy'
-    Write-Host '1. สร้าง Release และ Deploy ไป UAT'
-    Write-Host '2. เปรียบเทียบโค้ด UAT กับ Production'
-    Write-Host '3. Promote Release เดิมไป Production'
-    Write-Host '4. ออก'
-    $selection = Read-Host 'เลือกเมนู 1-4'
+    Write-Output 'D365 Finance - เมนู Release/Deploy'
+    Write-Output '1. อัปเดต UAT'
+    Write-Output '2. นำ Release ที่ผ่าน UAT ขึ้น Production'
+    Write-Output '3. ตรวจสอบสถานะและเปรียบเทียบอย่างเดียว'
+    Write-Output '4. ออก'
+    $selection = Read-WizardAnswer 'เลือกเมนู 1-4'
     $Action = switch ($selection) {
-        '1' { 'DeployUAT' }
-        '2' { 'Compare' }
-        '3' { 'PromoteProduction' }
+        '1' { $automaticReleaseRequested=$true; 'DeployUAT' }
+        '2' { 'PromoteProduction' }
+        '3' { 'Compare' }
         '4' { return }
         default { throw 'กรุณาเลือกเมนู 1-4 เท่านั้น' }
     }
     if ([string]::IsNullOrWhiteSpace($ReleaseId)) {
-        $ReleaseId = Read-Host 'ระบุ Release ID'
-        if ($ReleaseId -notmatch '^[A-Za-z0-9._-]+$') { throw 'ReleaseId has an invalid format.' }
+        if ($Action -ceq 'DeployUAT') {
+            $ReleaseId = Get-D365NextReleaseId -ReleaseRoot $ReleaseRoot -Now $WizardNow
+        } else {
+            $ReleaseId = Get-D365CurrentUatReleaseId -UatRoot $UatRoot
+        }
     }
 }
 

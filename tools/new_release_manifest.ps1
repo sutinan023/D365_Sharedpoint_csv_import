@@ -71,10 +71,13 @@ if ($PlanOnly) {
 if ([string]::IsNullOrWhiteSpace($OutputPath)) {
     $OutputPath = Join-Path (Split-Path -Parent $PSScriptRoot) "deployment\releases\$ReleaseId.json"
 }
-if (Test-Path -LiteralPath $OutputPath) {
-    throw "Release manifest already exists and is immutable: $OutputPath"
-}
 $outputDirectory = Split-Path -Parent $OutputPath
 New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
-$json | Set-Content -LiteralPath $OutputPath -Encoding UTF8
+$bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+try {
+    $stream = [IO.FileStream]::new($OutputPath,[IO.FileMode]::CreateNew,[IO.FileAccess]::Write,[IO.FileShare]::None)
+    try { $stream.Write($bytes,0,$bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+} catch [IO.IOException] {
+    throw "Release manifest already exists and is immutable: $OutputPath"
+}
 Write-Output $OutputPath

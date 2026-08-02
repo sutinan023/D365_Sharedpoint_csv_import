@@ -1,4 +1,4 @@
-$ErrorActionPreference = 'Stop'
+﻿$ErrorActionPreference = 'Stop'
 $scriptPath = Join-Path $PSScriptRoot '..\release.ps1'
 $testRoot = Join-Path ([IO.Path]::GetTempPath()) ('release-menu-{0}' -f [guid]::NewGuid())
 $sourceParent = Join-Path $testRoot 'source'
@@ -10,6 +10,11 @@ $projects = @('D365_Sharedpoint_csv_import', 'D365_file_csv_import', 'finance_re
 function Assert-True([bool] $Condition, [string] $Message) {
     if (-not $Condition) { throw $Message }
 }
+
+$releaseScriptBytes = [IO.File]::ReadAllBytes((Resolve-Path -LiteralPath $scriptPath))
+Assert-True ($releaseScriptBytes.Length -ge 3 -and $releaseScriptBytes[0] -eq 0xEF -and
+    $releaseScriptBytes[1] -eq 0xBB -and $releaseScriptBytes[2] -eq 0xBF) `
+    'release.ps1 must use UTF-8 BOM so Windows PowerShell 5.1 parses Thai text correctly.'
 
 function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
     try { & $Action; throw 'Expected failure.' } catch {
@@ -68,6 +73,18 @@ try {
         Assert-True (-not (Test-Path -LiteralPath (Join-Path $uatRoot "$project\app.php"))) 'PlanOnly copied a source file.'
     }
 
+    $wizardAnswers = [Collections.Generic.Queue[string]]::new()
+    $wizardAnswers.Enqueue('1')
+    $wizardInput = { param([string]$Prompt) $wizardAnswers.Dequeue() }.GetNewClosure()
+    $wizardOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -PlanOnly -LocalTestMode `
+        -WizardNow ([datetime]'2026-08-02') -WizardInputAdapter $wizardInput 6>&1)
+    foreach ($label in @('อัปเดต UAT','นำ Release ที่ผ่าน UAT ขึ้น Production','ตรวจสอบสถานะและเปรียบเทียบอย่างเดียว','ออก')) {
+        Assert-True (@($wizardOutput | Where-Object { [string]$_ -match [regex]::Escape($label) }).Count -eq 1) "Thai wizard label is missing: $label"
+    }
+    Assert-True (@($wizardOutput | Where-Object { [string]$_ -match '2026-08-02\.1' }).Count -gt 0) 'Wizard did not generate the next release ID.'
+    Assert-True (-not (Test-Path -LiteralPath (Join-Path $releaseRoot '2026-08-02.1.json'))) 'Wizard PlanOnly created a manifest.'
+
     try {
         & $scriptPath -Action DeployUAT -ReleaseId 'bad release id' -SourceParent $sourceParent `
             -UatRoot $uatRoot -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -PlanOnly -LocalTestMode | Out-Null
@@ -111,6 +128,14 @@ try {
             git_sha = [string] $manifestProjects[$project].git_sha
         } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $metadataDirectory 'current-release.json') -Encoding UTF8
     }
+
+    $statusAnswers = [Collections.Generic.Queue[string]]::new()
+    $statusAnswers.Enqueue('3')
+    $statusInput = { param([string]$Prompt) $statusAnswers.Dequeue() }.GetNewClosure()
+    $statusComparison = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -LocalTestMode `
+        -WizardInputAdapter $statusInput | Where-Object { $_.PSObject.Properties.Name -contains 'Environment' })
+    Assert-True ($statusComparison.Count -eq 6) 'Status wizard did not select the common UAT release automatically.'
 
     $comparison = @(& $scriptPath -Action Compare -ReleaseId '2026-08-01.3' `
         -SourceParent $sourceParent -UatRoot $uatRoot -ProductionRoot $productionRoot `

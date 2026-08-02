@@ -70,6 +70,11 @@ try {
         throw 'Custom project roots were not accepted.'
     }
 
+    $manifestScriptSource = Get-Content -LiteralPath $scriptPath -Raw
+    if ($manifestScriptSource -notmatch 'FileMode\]::CreateNew') {
+        throw 'Release manifest is not written atomically with FileMode.CreateNew.'
+    }
+
     Set-Content (Join-Path $testRoot 'finance_report\dirty.txt') 'dirty'
     try {
         & $scriptPath -ReleaseId 'dirty' -SourceParent $testRoot -PlanOnly | Out-Null
