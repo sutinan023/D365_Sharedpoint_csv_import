@@ -52,6 +52,27 @@ final class EnvironmentGuard
         return $environment;
     }
 
+    public static function validateRehearsal(array $environment): array
+    {
+        if (strtoupper(trim((string)($environment['APP_ENV'] ?? ''))) !== 'PRODUCTION'
+            || strcasecmp(trim((string)($environment['DB_NAME'] ?? '')), 'D365_finance_prod') !== 0) {
+            throw new RuntimeException('Rehearsal verification requires Production configuration.');
+        }
+        foreach (['REHEARSAL_DB_HOST', 'REHEARSAL_DB_USER', 'REHEARSAL_DB_PASS'] as $key) {
+            if (trim((string)($environment[$key] ?? '')) === '') {
+                throw new RuntimeException("{$key} is required");
+            }
+        }
+        $reader = trim((string)$environment['REHEARSAL_DB_USER']);
+        foreach (['DB_USER', 'MIGRATION_DB_USER', 'BACKUP_DB_USER'] as $privilegedKey) {
+            $privilegedUser = trim((string)($environment[$privilegedKey] ?? ''));
+            if ($privilegedUser !== '' && strcasecmp($reader, $privilegedUser) === 0) {
+                throw new RuntimeException("REHEARSAL_DB_USER must differ from {$privilegedKey}");
+            }
+        }
+        return $environment;
+    }
+
     private static function requirePathSegment(string $path, string $segment, string $label): void
     {
         $normalized = '/' . trim(str_replace('\\', '/', strtolower($path)), '/') . '/';

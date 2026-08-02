@@ -89,4 +89,26 @@ return [
 
         throw new RuntimeException('Expected cross-environment runtime path to be rejected');
     },
+    'environment guard accepts a dedicated rehearsal reader' => function () use ($validUat): void {
+        $production = array_replace($validUat, [
+            'APP_ENV' => 'PRODUCTION', 'DB_NAME' => 'D365_finance_prod',
+            'DB_USER' => 'prod_app', 'MIGRATION_DB_USER' => 'prod_migration', 'BACKUP_DB_USER' => 'prod_backup',
+            'REHEARSAL_DB_HOST' => '100.1.1.166', 'REHEARSAL_DB_USER' => 'd365_rehearsal_reader', 'REHEARSAL_DB_PASS' => 'reader-secret',
+        ]);
+        $validated = EnvironmentGuard::validateRehearsal($production);
+        assert($validated['REHEARSAL_DB_USER'] === 'd365_rehearsal_reader');
+    },
+    'environment guard rejects a shared privileged rehearsal user' => function () use ($validUat): void {
+        $production = array_replace($validUat, [
+            'APP_ENV' => 'PRODUCTION', 'DB_NAME' => 'D365_finance_prod',
+            'DB_USER' => 'shared_user', 'MIGRATION_DB_USER' => 'prod_migration', 'BACKUP_DB_USER' => 'prod_backup',
+            'REHEARSAL_DB_HOST' => '100.1.1.166', 'REHEARSAL_DB_USER' => 'shared_user', 'REHEARSAL_DB_PASS' => 'reader-secret',
+        ]);
+        try {
+            EnvironmentGuard::validateRehearsal($production);
+            throw new RuntimeException('shared rehearsal user was accepted');
+        } catch (RuntimeException $exception) {
+            assert(str_contains($exception->getMessage(), 'REHEARSAL_DB_USER'));
+        }
+    },
 ];

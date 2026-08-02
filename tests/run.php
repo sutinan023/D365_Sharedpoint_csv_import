@@ -10,6 +10,7 @@ $files = [
     __DIR__ . '/Database/FinanceViewMigrationContractTest.php',
     __DIR__ . '/Database/SchemaInventoryTest.php',
     __DIR__ . '/Database/CheckpointBaselineTest.php',
+    __DIR__ . '/Database/RehearsalVerifierTest.php',
     __DIR__ . '/Database/BackupCheckpointValidatorTest.php',
     __DIR__ . '/Support/LoggerTest.php',
     __DIR__ . '/Queue/FileQueueRepositoryTest.php',
