@@ -11,7 +11,6 @@
     [string] $ReleaseRoot = 'C:\xampp\backups\d365\releases',
     [string] $ApprovalToken,
     [string] $UatAcceptanceToken,
-    [string] $OperationalApprovalToken,
     [string] $ProductionApprovalToken,
     [string] $ApprovalAuditRoot = 'C:\xampp\backups\d365\release-approvals',
     [string] $UatApprovalPath,
@@ -29,7 +28,8 @@
     [datetime] $WizardNow = (Get-Date),
     [scriptblock] $WizardInputAdapter,
     [switch] $PlanOnly,
-    [switch] $LocalTestMode
+    [switch] $LocalTestMode,
+    [string] $OperationalApprovalToken
 )
 
 $ErrorActionPreference = 'Stop'
@@ -362,7 +362,7 @@ function Invoke-PromoteProduction {
         $expectedOperationalApproval = "APPROVE OPERATIONAL $ReleaseId"
         $actualOperationalApproval = $OperationalApprovalToken
         if ($interactiveMenu) {
-            if (-not (Read-WizardConfirmation "ยืนยันดำเนินการไฟล์ตั้งค่าระบบสำหรับ Release $ReleaseId หรือไม่?")) {
+            if (-not (Read-WizardConfirmation "ยืนยันดำเนินการไฟล์ตั้งค่าระบบสำหรับ Production Release $ReleaseId หรือไม่?")) {
                 Write-Output "ยกเลิก Operational Release $ReleaseId ก่อนดำเนินการ Production"
                 return
             }
@@ -394,9 +394,10 @@ function Invoke-PromoteProduction {
             if ($LocalTestMode) {
                 throw 'LocalTestMode migration requires MigrationCommandAdapter and will not access real tasks or databases.'
             }
+            $manualRestoreReader = ${function:Read-WizardAnswer}
             $waitForManualRestore = {
                 param([string] $RehearsalDatabase, [string] $SanitizedPath)
-                [void] (Read-WizardAnswer 'กด Enter หลัง Import สำเร็จ')
+                [void] (& $manualRestoreReader "กด Enter หลัง Import ไปยัง Rehearsal Database $RehearsalDatabase สำหรับ Production Release $ReleaseId สำเร็จ")
             }.GetNewClosure()
             $MigrationCommandAdapter = New-D365ManualRestoreMigrationAdapter -Manifest $release.Manifest `
                 -SourceProjects $sourceProjects -ProductionRoot $ProductionRoot `

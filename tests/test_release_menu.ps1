@@ -16,9 +16,29 @@ Assert-True ($releaseScriptBytes.Length -ge 3 -and $releaseScriptBytes[0] -eq 0x
     $releaseScriptBytes[1] -eq 0xBB -and $releaseScriptBytes[2] -eq 0xBF) `
     'release.ps1 must use UTF-8 BOM so Windows PowerShell 5.1 parses Thai text correctly.'
 $releaseScriptText = [Text.Encoding]::UTF8.GetString($releaseScriptBytes)
-foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT','ยืนยันใช้ Migration','กด Enter หลัง Import สำเร็จ')) {
+$parserTokens = $null
+$parserErrors = $null
+$releaseAst = [Management.Automation.Language.Parser]::ParseFile(
+    (Resolve-Path -LiteralPath $scriptPath).ProviderPath, [ref] $parserTokens, [ref] $parserErrors)
+Assert-True ($parserErrors.Count -eq 0) 'release.ps1 did not parse while checking parameter compatibility.'
+$parameterNames = @($releaseAst.ParamBlock.Parameters | ForEach-Object { $_.Name.VariablePath.UserPath })
+$legacyParameterNames = @(
+    'Action','ReleaseId','SourceParent','UatRoot','ProductionRoot','ReleaseRoot','ApprovalToken',
+    'UatAcceptanceToken','ProductionApprovalToken','ApprovalAuditRoot','UatApprovalPath',
+    'ExpectedUatApprovalSha256','PhpPath','MigrationApprovalToken','MigrationBackupRoot',
+    'MigrationAppliedBy','ProductionTaskNames','MigrationCommandAdapter','WizardNow',
+    'WizardInputAdapter','PlanOnly','LocalTestMode'
+)
+Assert-True (($parameterNames[0..($legacyParameterNames.Count - 1)] -join "`n") -ceq ($legacyParameterNames -join "`n")) `
+    'Adding OperationalApprovalToken changed the positional order of an existing release.ps1 parameter.'
+Assert-True ($parameterNames[-1] -ceq 'OperationalApprovalToken') `
+    'OperationalApprovalToken must be appended after every legacy release.ps1 parameter.'
+foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT','ยืนยันใช้ Migration')) {
     Assert-True ($releaseScriptText.Contains($thaiPrompt)) "Thai confirmation is missing: $thaiPrompt"
 }
+Assert-True ($releaseScriptText.Contains(
+    'กด Enter หลัง Import ไปยัง Rehearsal Database $RehearsalDatabase สำหรับ Production Release $ReleaseId สำเร็จ')) `
+    'Manual rehearsal Enter prompt must identify Production, ReleaseId, and RehearsalDatabase.'
 foreach ($removedPrompt in @('ระบุ path ของ checkpoint manifest','ระบุ path ของ restore-approved receipt')) {
     Assert-True (-not $releaseScriptText.Contains($removedPrompt)) "Old technical prompt is still visible: $removedPrompt"
 }
@@ -29,6 +49,14 @@ function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
     try { & $Action; throw 'Expected failure.' } catch {
         if ($_.Exception.Message -eq 'Expected failure.' -or $_.Exception.Message -notmatch $Pattern) { throw }
     }
+}
+
+function Get-TreeFingerprint([string] $Root) {
+    $resolvedRoot = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\', '/')
+    return (@(Get-ChildItem -LiteralPath $resolvedRoot -File -Recurse -Force | Sort-Object FullName | ForEach-Object {
+        $relativePath = $_.FullName.Substring($resolvedRoot.Length).TrimStart('\', '/')
+        "$relativePath|$($_.Length)|$((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)"
+    }) -join "`n")
 }
 
 function Set-TightAcl([string] $Path) {
@@ -361,8 +389,12 @@ try {
     $operationalCancelOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
         -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -ApprovalAuditRoot $auditRoot `
         -LocalTestMode -WizardInputAdapter $operationalCancelInput -MigrationCommandAdapter $operationalCancelAdapter 6>&1)
-    Assert-True (@($operationalCancelPrompts | Where-Object { $_ -match 'ตั้งค่าระบบ' }).Count -eq 1) 'Operational Y/N prompt was not shown.'
-    Assert-True (@($operationalCancelPrompts | Where-Object { $_ -match 'Production' }).Count -eq 0) 'Operational N reached the Production prompt.'
+    $operationalPrompt = @($operationalCancelPrompts | Where-Object { $_ -match 'ตั้งค่าระบบ' })[0]
+    Assert-True ($operationalPrompt -ceq "ยืนยันดำเนินการไฟล์ตั้งค่าระบบสำหรับ Production Release $operationalReleaseId หรือไม่? [Y/N]") `
+        'Operational prompt did not identify Production and the exact ReleaseId.'
+    Assert-True (@($operationalCancelPrompts | Where-Object {
+        $_ -ceq "ยืนยันนำ Release $operationalReleaseId ขึ้น Production หรือไม่? [Y/N]"
+    }).Count -eq 0) 'Operational N reached the final Production deploy prompt.'
     Assert-True ($operationalCancelStages.Count -eq 0) 'Operational N reached the migration adapter.'
     Assert-True (@($operationalCancelOutput | Where-Object { $_ -is [string] -and $_ -match 'ยกเลิก.*Operational' }).Count -eq 1) `
         'Operational N did not cancel safely before Production sync validation.'
@@ -431,6 +463,55 @@ try {
     Assert-True (@($migrationSuccess | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) 'Migration promotion did not complete its local gates.'
 
     Remove-Item -LiteralPath $migrationReceiptPath -Force
+    $productionFingerprintBeforeUatResultN = Get-TreeFingerprint -Root $productionRoot
+    $migrationStages.Clear()
+    $uatResultCancelAnswers = [Collections.Generic.Queue[string]]::new()
+    foreach ($answer in @('2','N')) { $uatResultCancelAnswers.Enqueue($answer) }
+    $uatResultCancelPrompts = [Collections.Generic.List[string]]::new()
+    $uatResultCancelInput = {
+        param([string] $Prompt)
+        $uatResultCancelPrompts.Add($Prompt)
+        $uatResultCancelAnswers.Dequeue()
+    }.GetNewClosure()
+    $uatResultCancelOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -ApprovalAuditRoot $auditRoot `
+        -LocalTestMode -WizardInputAdapter $uatResultCancelInput -MigrationCommandAdapter $interactiveMigrationAdapter 6>&1)
+    Assert-True (@($uatResultCancelPrompts | Where-Object {
+        $_ -ceq "ยืนยันว่าทดสอบ UAT Release $migrationReleaseId ผ่านแล้วหรือไม่? [Y/N]"
+    }).Count -eq 1) 'UAT-result N test did not reach the exact acceptance prompt.'
+    Assert-True ($migrationStages.Count -eq 0) 'UAT-result N reached a migration adapter stage.'
+    Assert-True (-not (Test-Path -LiteralPath $migrationReceiptPath)) 'UAT-result N created an approval receipt.'
+    Assert-True (@($uatResultCancelOutput | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 0) `
+        'UAT-result N reached Production sync validation.'
+    Assert-True ((Get-TreeFingerprint -Root $productionRoot) -ceq $productionFingerprintBeforeUatResultN) `
+        'UAT-result N mutated the Production fixture.'
+
+    $productionFingerprintBeforeProductionN = Get-TreeFingerprint -Root $productionRoot
+    $migrationStages.Clear()
+    $productionCancelAnswers = [Collections.Generic.Queue[string]]::new()
+    foreach ($answer in @('2','Y','Y','N')) { $productionCancelAnswers.Enqueue($answer) }
+    $productionCancelPrompts = [Collections.Generic.List[string]]::new()
+    $productionCancelInput = {
+        param([string] $Prompt)
+        $productionCancelPrompts.Add($Prompt)
+        if ($Prompt -ceq "ยืนยันนำ Release $migrationReleaseId ขึ้น Production หรือไม่? [Y/N]" -and
+            (Test-Path -LiteralPath $migrationReceiptPath)) {
+            Remove-Item -LiteralPath $migrationReceiptPath -Force
+        }
+        $productionCancelAnswers.Dequeue()
+    }.GetNewClosure()
+    $productionCancelOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -ApprovalAuditRoot $auditRoot `
+        -LocalTestMode -WizardInputAdapter $productionCancelInput -MigrationCommandAdapter $interactiveMigrationAdapter 6>&1)
+    Assert-True (@($productionCancelPrompts | Where-Object {
+        $_ -ceq "ยืนยันนำ Release $migrationReleaseId ขึ้น Production หรือไม่? [Y/N]"
+    }).Count -eq 1) 'Production N test did not reach the final Production deploy prompt.'
+    Assert-True ($migrationStages.Count -eq 0) 'Final Production N reached a migration adapter stage.'
+    Assert-True (@($productionCancelOutput | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 0) `
+        'Final Production N reached Production sync validation.'
+    Assert-True ((Get-TreeFingerprint -Root $productionRoot) -ceq $productionFingerprintBeforeProductionN) `
+        'Final Production N mutated the Production fixture.'
+
     $migrationStages.Clear()
     $interactiveOrder = [Collections.Generic.List[string]]::new()
     $interactivePrompts = [Collections.Generic.List[string]]::new()
@@ -491,7 +572,9 @@ try {
     $firstMigrationStageIndex = $interactiveOrder.IndexOf('stage:disable-production-tasks')
     $uatPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*UAT' })[0]
     $operationalPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*ตั้งค่าระบบ' })[0]
-    $productionPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*Production' })[0]
+    $productionPromptEvent = @($interactiveOrder | Where-Object {
+        $_ -ceq "prompt:ยืนยันนำ Release $migrationReleaseId ขึ้น Production หรือไม่? [Y/N]"
+    })[0]
     $migrationPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*Migration' })[0]
     Assert-True ($productionPromptEvent -ceq "prompt:ยืนยันนำ Release $migrationReleaseId ขึ้น Production หรือไม่? [Y/N]") `
         'Interactive Production confirmation did not use the Y/N wizard prompt.'
