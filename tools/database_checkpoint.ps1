@@ -98,6 +98,22 @@ if (-not (Test-Path -LiteralPath $backupFile) -or (Get-Item -LiteralPath $backup
     throw 'Database checkpoint file is missing or empty.'
 }
 
+$phpExecutable = 'C:\xampp\php\php.exe'
+$baselineScript = Join-Path $ProjectRoot 'tools\checkpoint_baseline.php'
+foreach ($requiredPath in @($phpExecutable, $baselineScript)) {
+    if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+        throw "Checkpoint baseline dependency not found: $requiredPath"
+    }
+}
+$baselineJson = (& $phpExecutable $baselineScript | Out-String).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($baselineJson)) {
+    throw 'Checkpoint baseline capture failed.'
+}
+try { $baseline = $baselineJson | ConvertFrom-Json } catch { throw 'Checkpoint baseline returned invalid JSON.' }
+if ([string] $baseline.database -cne 'D365_finance_prod') {
+    throw 'Checkpoint baseline selected the wrong database.'
+}
+
 [pscustomobject]@{
     database = $database
     release_id = $ReleaseId
@@ -105,8 +121,9 @@ if (-not (Test-Path -LiteralPath $backupFile) -or (Get-Item -LiteralPath $backup
     backup_file = (Resolve-Path -LiteralPath $backupFile).ProviderPath
     sha256 = (Get-FileHash -LiteralPath $backupFile -Algorithm SHA256).Hash
     size_bytes = (Get-Item -LiteralPath $backupFile).Length
+    verification_baseline = $baseline
     restore_receipt_file = "$backupFile.restore-approved.json"
-} | ConvertTo-Json | Set-Content -LiteralPath "$backupFile.json" -Encoding UTF8
+} | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$backupFile.json" -Encoding UTF8
 
 $cutoff = (Get-Date).AddDays(-$RetentionDays)
 foreach ($expiredBackup in Get-ChildItem -LiteralPath $environmentBackupRoot -File -Filter '*.sql' | Where-Object LastWriteTime -lt $cutoff) {

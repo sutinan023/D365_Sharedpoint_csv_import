@@ -19,5 +19,11 @@ if ($scriptSource -notmatch 'BACKUP_DB_USER' -or $scriptSource -notmatch 'BACKUP
 if ($scriptSource -notmatch '\.ProviderPath') {
     throw 'Database checkpoint does not store a PHP-compatible filesystem path'
 }
+if ($scriptSource -notmatch 'checkpoint_baseline\.php' -or $scriptSource -notmatch 'verification_baseline') {
+    throw 'Database checkpoint does not bind an automatic verification baseline.'
+}
+if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\tools\checkpoint_baseline.php'))) {
+    throw 'Checkpoint baseline CLI is missing.'
+}
 
 Write-Host 'Database checkpoint plan checks passed.'
