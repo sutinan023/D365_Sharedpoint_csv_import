@@ -120,11 +120,19 @@ try {
     }
     $cancelAnswers = [Collections.Generic.Queue[string]]::new()
     $cancelAnswers.Enqueue('1')
+    $cancelAnswers.Enqueue('maybe')
     $cancelAnswers.Enqueue('N')
-    $cancelInput = { param([string] $Prompt) $cancelAnswers.Dequeue() }.GetNewClosure()
+    $cancelPrompts = [Collections.Generic.List[string]]::new()
+    $cancelInput = {
+        param([string] $Prompt)
+        $cancelPrompts.Add($Prompt)
+        $cancelAnswers.Dequeue()
+    }.GetNewClosure()
     $cancelOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
         -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -LocalTestMode `
         -WizardNow ([datetime]'2026-08-02') -WizardInputAdapter $cancelInput 6>&1)
+    Assert-True (@($cancelPrompts | Where-Object { $_ -match '\[Y/N\]' }).Count -eq 2) `
+        'Invalid input followed by N was not asked again.'
     Assert-True (@($cancelOutput | Where-Object { [string]$_ -match 'ยกเลิกการอัปเดต UAT Release 2026-08-02\.2' }).Count -eq 1) `
         'N did not cancel the interactive UAT deployment.'
     foreach ($project in $projects) {

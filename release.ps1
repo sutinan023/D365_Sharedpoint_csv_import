@@ -53,7 +53,7 @@ function Read-WizardConfirmation([string] $Prompt) {
         $answer = ([string] (Read-WizardAnswer "$Prompt [Y/N]")).Trim()
         if ($answer -ieq 'Y') { return $true }
         if ($answer -ieq 'N') { return $false }
-        Write-Output 'กรุณาตอบ Y หรือ N เท่านั้น'
+        Write-Host 'กรุณาตอบ Y หรือ N เท่านั้น'
     }
 }
 
