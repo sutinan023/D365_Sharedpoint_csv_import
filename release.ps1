@@ -404,22 +404,16 @@ function Invoke-PromoteProduction {
                 -WaitForManualRestore $waitForManualRestore
         }
         $migrationApprovalProvider = $null
+        $migrationDecisionProvider = $null
         if ([string]::IsNullOrWhiteSpace($MigrationApprovalToken)) {
-            $migrationApprovalProvider = if ($interactiveMenu) {
-                $migrationApprovalReader = if ($LocalTestMode -and $null -ne $WizardInputAdapter) {
-                    $WizardInputAdapter
-                } else {
-                    { param([string] $Prompt) Read-Host $Prompt }
-                }
-                {
+            if ($interactiveMenu) {
+                $migrationConfirmationReader = ${function:Read-WizardConfirmation}
+                $migrationDecisionProvider = {
                     param([string] $ApprovedReleaseId)
-                    $thaiMigrationApproval = "ยืนยันใช้ MIGRATION $ApprovedReleaseId"
-                    $answer = & $migrationApprovalReader "พิมพ์ $thaiMigrationApproval"
-                    if ($answer -cne $thaiMigrationApproval) { throw 'ข้อความยืนยัน Migration ไม่ถูกต้อง' }
-                    return "APPLY MIGRATION $ApprovedReleaseId"
+                    & $migrationConfirmationReader "ยืนยันใช้ Migration กับ Production Release $ApprovedReleaseId หรือไม่?"
                 }.GetNewClosure()
             } else {
-                {
+                $migrationApprovalProvider = {
                     param([string] $ApprovedReleaseId)
                     Read-Host "พิมพ์ APPLY MIGRATION $ApprovedReleaseId หลัง Restore rehearsal ผ่าน"
                 }
@@ -432,7 +426,12 @@ function Invoke-PromoteProduction {
             CommandAdapter=$MigrationCommandAdapter
         }
         if ($null -ne $migrationApprovalProvider) { $migrationArguments.ApprovalProvider = $migrationApprovalProvider }
+        if ($null -ne $migrationDecisionProvider) { $migrationArguments.ApprovalDecisionProvider = $migrationDecisionProvider }
         $migrationResult = Invoke-D365MigrationPromotion @migrationArguments
+        if ($migrationResult.Cancelled -eq $true) {
+            Write-Output 'ยกเลิก Migration และคืนสถานะ Production Task แล้ว'
+            return
+        }
     }
 
     foreach ($project in $script:D365ProjectNames) {

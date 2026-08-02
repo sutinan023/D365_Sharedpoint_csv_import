@@ -16,7 +16,7 @@ Assert-True ($releaseScriptBytes.Length -ge 3 -and $releaseScriptBytes[0] -eq 0x
     $releaseScriptBytes[1] -eq 0xBB -and $releaseScriptBytes[2] -eq 0xBF) `
     'release.ps1 must use UTF-8 BOM so Windows PowerShell 5.1 parses Thai text correctly.'
 $releaseScriptText = [Text.Encoding]::UTF8.GetString($releaseScriptBytes)
-foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT','ยืนยันใช้ MIGRATION','กด Enter หลัง Import สำเร็จ')) {
+foreach ($thaiPrompt in @('ยืนยันว่าทดสอบ UAT','ยืนยันใช้ Migration','กด Enter หลัง Import สำเร็จ')) {
     Assert-True ($releaseScriptText.Contains($thaiPrompt)) "Thai confirmation is missing: $thaiPrompt"
 }
 foreach ($removedPrompt in @('ระบุ path ของ checkpoint manifest','ระบุ path ของ restore-approved receipt')) {
@@ -450,8 +450,35 @@ try {
             default { [pscustomobject]@{Success=$true} }
         }
     }.GetNewClosure()
+    $productionDriftPath = Join-Path $productionRoot 'D365_Sharedpoint_csv_import\same.php'
+    Set-Content -LiteralPath $productionDriftPath -Value 'cancelled migration must not validate Production sync'
+    $migrationCancelAnswers = [Collections.Generic.Queue[string]]::new()
+    foreach ($answer in @('2','Y','Y','Y','maybe','N')) { $migrationCancelAnswers.Enqueue($answer) }
+    $migrationCancelPrompts = [Collections.Generic.List[string]]::new()
+    $migrationCancelInput = {
+        param([string] $Prompt)
+        $migrationCancelPrompts.Add($Prompt)
+        $migrationCancelAnswers.Dequeue()
+    }.GetNewClosure()
+    $migrationCancelOutput = @(& $scriptPath -Action Menu -SourceParent $sourceParent -UatRoot $uatRoot `
+        -ProductionRoot $productionRoot -ReleaseRoot $releaseRoot -ApprovalAuditRoot $auditRoot `
+        -LocalTestMode -WizardInputAdapter $migrationCancelInput -MigrationCommandAdapter $interactiveMigrationAdapter 6>&1)
+    Assert-True (@($migrationCancelPrompts | Where-Object { $_ -match "Migration.*$([regex]::Escape($migrationReleaseId)).*\[Y/N\]" }).Count -eq 2) `
+        'Invalid Migration Y/N answer was not asked again.'
+    Assert-True ($migrationStages -notcontains 'apply-production') 'Migration N reached Production apply.'
+    Assert-True ($migrationStages[-1] -ceq 'restore-production-task-states') 'Migration N did not restore task states.'
+    Assert-True (@($migrationCancelOutput | Where-Object { $_ -is [string] -and $_ -match 'ยกเลิก Migration' }).Count -eq 1) `
+        'Migration N did not report safe cancellation.'
+    Assert-True (@($migrationCancelOutput | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 0) `
+        'Migration N continued into Production sync validation.'
+    Set-Content -LiteralPath $productionDriftPath -Value '<?php echo "same";'
+
+    Remove-Item -LiteralPath $migrationReceiptPath -Force
+    $migrationStages.Clear()
+    $interactiveOrder.Clear()
+    $interactivePrompts.Clear()
     $interactiveAnswers = [Collections.Generic.Queue[string]]::new()
-    foreach ($answer in @('2','Y','Y','Y',"ยืนยันใช้ MIGRATION $migrationReleaseId")) { $interactiveAnswers.Enqueue($answer) }
+    foreach ($answer in @('2','Y','Y','Y','Y')) { $interactiveAnswers.Enqueue($answer) }
     $interactiveInput = {
         param([string] $Prompt)
         $interactivePrompts.Add($Prompt)
@@ -465,11 +492,16 @@ try {
     $uatPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*UAT' })[0]
     $operationalPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*ตั้งค่าระบบ' })[0]
     $productionPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*Production' })[0]
+    $migrationPromptEvent = @($interactiveOrder | Where-Object { $_ -match '^prompt:.*Migration' })[0]
     Assert-True ($productionPromptEvent -ceq "prompt:ยืนยันนำ Release $migrationReleaseId ขึ้น Production หรือไม่? [Y/N]") `
         'Interactive Production confirmation did not use the Y/N wizard prompt.'
     Assert-True ($firstMigrationStageIndex -gt $interactiveOrder.IndexOf($uatPromptEvent)) 'Migration started before UAT confirmation.'
     Assert-True ($firstMigrationStageIndex -gt $interactiveOrder.IndexOf($operationalPromptEvent)) 'Migration started before Operational confirmation.'
     Assert-True ($firstMigrationStageIndex -gt $interactiveOrder.IndexOf($productionPromptEvent)) 'Migration started before Production confirmation.'
+    Assert-True ($interactiveOrder.IndexOf($migrationPromptEvent) -gt $interactiveOrder.IndexOf('stage:approve-rehearsal-automatically')) `
+        'Migration confirmation was requested before rehearsal approval.'
+    Assert-True ($interactiveOrder.IndexOf($migrationPromptEvent) -lt $interactiveOrder.IndexOf('stage:approve-production-migration')) `
+        'Migration confirmation was requested after Production migration approval.'
     Assert-True (@($interactiveMigrationSuccess | Where-Object { $_ -is [string] -and $_ -match 'Production gates passed' }).Count -eq 1) `
         'Interactive mixed-risk promotion did not finish in LocalTestMode.'
 }

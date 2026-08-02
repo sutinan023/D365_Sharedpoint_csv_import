@@ -43,6 +43,7 @@ $result = Invoke-D365MigrationPromotion -ReleaseId 'r1' -ManifestPath 'manifest.
     -ProjectRoot 'project' -BackupRoot 'backup' -TaskNames @('Import A') `
     -ApprovalToken 'APPLY MIGRATION r1' -CommandAdapter (New-TestAdapter -Stages $stages)
 Assert-True ($result.TasksRemainDisabled -eq $true) 'Tasks must remain disabled until code/config/smoke verification succeeds.'
+Assert-True ($result.Cancelled -eq $false) 'Successful migration promotion was incorrectly marked as cancelled.'
 Assert-True (@($result.FirstApply.Applied).Count -eq 1) 'First apply result was lost.'
 Assert-True (@($result.SecondApply.Applied).Count -eq 0) 'Idempotence result was lost.'
 $instructionNames = @($result.Instructions.PSObject.Properties.Name | Where-Object { $_ -cne 'Success' } | Sort-Object)
@@ -66,6 +67,35 @@ $approvalIndex = $providerStages.IndexOf('request-migration-approval')
 Assert-True ($approvalIndex -gt $providerStages.IndexOf('approve-rehearsal-automatically') -and
     $approvalIndex -lt $providerStages.IndexOf('approve-production-migration')) `
     'Migration confirmation was not requested immediately before Production apply approval.'
+
+$cancelStages = [Collections.Generic.List[string]]::new()
+$cancelReleaseIds = [Collections.Generic.List[string]]::new()
+$cancelDecision = {
+    param([string] $ReleaseId)
+    $cancelReleaseIds.Add($ReleaseId)
+    return $false
+}.GetNewClosure()
+$cancelResult = Invoke-D365MigrationPromotion -ReleaseId 'r1' -ManifestPath 'manifest.json' `
+    -ProjectRoot 'project' -BackupRoot 'backup' -TaskNames @('Import A','Import B') `
+    -ApprovalDecisionProvider $cancelDecision -CommandAdapter (New-TestAdapter -Stages $cancelStages)
+Assert-True $cancelResult.Cancelled 'Migration N did not return a cancellation result.'
+Assert-True (($cancelReleaseIds -join ',') -ceq 'r1') 'Migration decision provider did not receive the exact release ID.'
+Assert-True ($cancelStages -notcontains 'approve-production-migration') 'Migration N reached Production approval.'
+Assert-True ($cancelStages -notcontains 'apply-production') 'Migration N reached Production apply.'
+Assert-True ($cancelStages[-1] -ceq 'restore-production-task-states') 'Migration N did not restore task state.'
+Assert-True (($cancelResult.RestoredTasks -join ',') -ceq 'Import A') `
+    'Migration N did not restore exactly the tasks that were enabled before migration.'
+Assert-True ($cancelResult.TasksRemainDisabled -eq $false) 'Successful Migration cancellation reported tasks as disabled.'
+
+$restoreFailureStages = [Collections.Generic.List[string]]::new()
+Assert-Throws {
+    Invoke-D365MigrationPromotion -ReleaseId 'r1' -ManifestPath 'manifest.json' `
+        -ProjectRoot 'project' -BackupRoot 'backup' -TaskNames @('Import A','Import B') `
+        -ApprovalDecisionProvider $cancelDecision `
+        -CommandAdapter (New-TestAdapter -FailStage 'restore-production-task-states' -Stages $restoreFailureStages) | Out-Null
+} 'restore-production-task-states'
+Assert-True ($restoreFailureStages -notcontains 'apply-production') `
+    'Failed cancellation restoration reached Production apply.'
 
 $wrongApprovalStages = [Collections.Generic.List[string]]::new()
 Assert-Throws {

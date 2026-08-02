@@ -23,6 +23,7 @@ function Invoke-D365MigrationPromotion {
         [Parameter(Mandatory = $true)][string[]] $TaskNames,
         [string] $ApprovalToken,
         [scriptblock] $ApprovalProvider,
+        [scriptblock] $ApprovalDecisionProvider,
         [Parameter(Mandatory = $true)][scriptblock] $CommandAdapter
     )
 
@@ -60,6 +61,21 @@ function Invoke-D365MigrationPromotion {
         $context.RestoreReceiptPath = [string] $rehearsalApproval.RestoreReceiptPath
     }
 
+    if ($null -ne $ApprovalDecisionProvider) {
+        $approved = & $ApprovalDecisionProvider $ReleaseId
+        if ($approved -ne $true) {
+            $restored = Invoke-D365MigrationStage 'restore-production-task-states' $CommandAdapter $context
+            return [pscustomobject]@{
+                ReleaseId = $ReleaseId
+                Cancelled = $true
+                RestoredTasks = @($restored.RestoredTasks)
+                TasksRemainDisabled = $false
+                Context = $context
+            }
+        }
+        $ApprovalToken = "APPLY MIGRATION $ReleaseId"
+    }
+
     $expectedApproval = "APPLY MIGRATION $ReleaseId"
     if ([string]::IsNullOrWhiteSpace($ApprovalToken) -and $null -ne $ApprovalProvider) {
         $ApprovalToken = & $ApprovalProvider $ReleaseId
@@ -81,6 +97,7 @@ function Invoke-D365MigrationPromotion {
 
     [pscustomobject]@{
         ReleaseId = $ReleaseId
+        Cancelled = $false
         Checkpoint = $checkpoint
         Instructions = $instructions
         Rehearsal = $rehearsalApproval
