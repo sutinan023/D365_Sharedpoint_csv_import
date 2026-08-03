@@ -46,7 +46,7 @@ $pdo = new PDO(
     [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION, PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC]
 );
 
-if ($pdo->query('SELECT DATABASE()')->fetchColumn() !== 'D365_finance') {
+if (strcasecmp((string) $pdo->query('SELECT DATABASE()')->fetchColumn(), 'D365_finance') !== 0) {
     throw new RuntimeException('Connected database is not the UAT finance database.');
 }
 

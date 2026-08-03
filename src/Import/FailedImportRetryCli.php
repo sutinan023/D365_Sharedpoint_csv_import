@@ -19,7 +19,7 @@ final class FailedImportRetryCli
             }
 
             $connection = $connector($environment);
-            if ($connection->query('SELECT DATABASE()')->fetchColumn() !== 'D365_finance_prod') {
+            if (strcasecmp((string) $connection->query('SELECT DATABASE()')->fetchColumn(), 'D365_finance_prod') !== 0) {
                 throw new \RuntimeException('Connected database is not the Production finance database.');
             }
 

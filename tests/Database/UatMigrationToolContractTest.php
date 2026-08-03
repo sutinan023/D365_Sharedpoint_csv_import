@@ -11,4 +11,13 @@ return [
         assert(!str_contains($source, "\$environment['DB_PASS']"));
         assert(!str_contains($source, 'D365_finance_prod'));
     },
+    'uat migration command accepts a case-normalized connected UAT database' => function (): void {
+        $path = dirname(__DIR__, 2) . '/tools/apply_uat_migrations.php';
+        $source = (string) file_get_contents($path);
+
+        assert(str_contains(
+            $source,
+            "strcasecmp((string) \$pdo->query('SELECT DATABASE()')->fetchColumn(), 'D365_finance') !== 0"
+        ));
+    },
 ];

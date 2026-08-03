@@ -246,7 +246,7 @@ return [
         $invalid = runFailedImportRetryCli(['--apply', '--id=0', '--file=retry.csv', '--sha256=not-a-hash']);
         assert($invalid === ['exit' => 2, 'stdout' => '', 'stderr' => 'Invalid retry identifier or SHA-256.' . PHP_EOL]);
     },
-    'failed import retry CLI guards prevent connection and retry until Production database checks pass' => function () use ($failedImportRetryHash): void {
+    'failed import retry CLI accepts normalized Production database names and rejects different ones before retry' => function () use ($failedImportRetryHash): void {
         $cli = new FailedImportRetryCli();
         $options = ['apply' => false, 'id' => '44', 'file' => 'retry.csv', 'sha256' => $failedImportRetryHash];
         $connectorCalls = 0;
@@ -280,7 +280,7 @@ return [
         $productionConnection = new class {
             public function query(string $sql): object {
                 return new class {
-                    public function fetchColumn(): string { return 'D365_finance_prod'; }
+                    public function fetchColumn(): string { return 'd365_finance_prod'; }
                 };
             }
         };
