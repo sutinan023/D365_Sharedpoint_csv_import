@@ -96,9 +96,11 @@ try {
     }}
     $waitEvents = [Collections.Generic.List[string]]::new()
     $wait = { param([string]$Database,[string]$Path) $waitEvents.Add("$Database|$Path") }.GetNewClosure()
-    Assert-True ((Get-D365TaskSchedulerComputerName '\\100.1.1.166\D365') -ceq '100.1.1.166') 'UNC scheduler computer derivation is wrong.'
+    Assert-True ((Get-D365TaskSchedulerComputerName '\\100.1.1.166\htdocs\prod') -ceq '100.1.1.166') 'UNC scheduler computer derivation is wrong.'
     Assert-True ((Get-D365TaskSchedulerComputerName $root) -ceq [string] $env:COMPUTERNAME) 'Local scheduler computer derivation is wrong.'
     Assert-Throws { Get-D365TaskSchedulerComputerName 'relative\production' | Out-Null } 'absolute local path or UNC'
+    Assert-Throws { Get-D365TaskSchedulerComputerName '\\server\' | Out-Null } 'absolute local path or UNC'
+    Assert-Throws { Get-D365TaskSchedulerComputerName '\\?\C:\prod' | Out-Null } 'absolute local path or UNC'
     Reset-FakeSchtasks
     $adapter = New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
         -ProductionRoot '\\100.1.1.166\D365' -BackupRoot (Join-Path $root 'backup') `
@@ -127,6 +129,16 @@ try {
         'Every task query must finish before the first state-changing command.'
     Assert-True (@($schedulerState.Commands | Where-Object { [Array]::IndexOf($_, '/S') -lt 0 -or $_[[Array]::IndexOf($_, '/S') + 1] -cne '100.1.1.166' }).Count -eq 0) `
         'Every scheduler command must target 100.1.1.166.'
+    foreach ($fullTaskName in @(
+        '\D365 SharePoint CSV Import [PROD]',
+        '\D365 File CSV Import [PROD]',
+        '\D365 SharePoint CSV Download Cleanup [PROD]'
+    )) {
+        Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Query' -and $_ -contains '/XML' -and $_ -contains $fullTaskName }).Count -eq 1) `
+            "Task XML query was not recorded exactly once: $fullTaskName"
+        Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Query' -and $_ -contains '/FO' -and $_ -contains 'CSV' -and $_ -contains '/NH' -and $_ -contains $fullTaskName }).Count -eq 1) `
+            "Task CSV query was not recorded exactly once: $fullTaskName"
+    }
     Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/End' -and $_ -contains '\D365 SharePoint CSV Download Cleanup [PROD]' }).Count -eq 1) `
         'The running task was not ended.'
     Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Change' -and $_ -contains '/Disable' }).Count -eq 2) `

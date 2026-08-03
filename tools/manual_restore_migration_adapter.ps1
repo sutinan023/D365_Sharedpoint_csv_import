@@ -86,7 +86,11 @@ function Complete-D365ManualRestoreWizard {
 }
 
 function Get-D365TaskSchedulerComputerName([string] $ProductionRoot) {
-    if ($ProductionRoot -match '^\\\\([^\\]+)\\') { return [string] $Matches[1] }
+    if ($ProductionRoot -match '^\\\\[?.]\\') { throw 'ProductionRoot must be an absolute local path or UNC path.' }
+    if ($ProductionRoot -match '^\\\\(?<computer>[^\\/:*?"<>|]+)\\(?<share>[^\\/:*?"<>|]+)(?:\\|$)') {
+        return [string] $Matches['computer']
+    }
+    if ($ProductionRoot.StartsWith('\\')) { throw 'ProductionRoot must be an absolute local path or UNC path.' }
     if ([IO.Path]::IsPathRooted($ProductionRoot)) { return [string] $env:COMPUTERNAME }
     throw 'ProductionRoot must be an absolute local path or UNC path.'
 }
