@@ -44,6 +44,12 @@ foreach ($removedPrompt in @('ระบุ path ของ checkpoint manifest','
 }
 Assert-True (-not $releaseScriptText.Contains('พิมพ์ $thaiApproval')) `
     'Interactive UAT deployment still expects the former Thai typed approval.'
+Assert-True ($releaseScriptText.Contains(
+    '$taskSchedulerComputerName = Get-D365TaskSchedulerComputerName -ProductionRoot $ProductionRoot')) `
+    'Production promotion does not derive the remote scheduler computer.'
+Assert-True ($releaseScriptText.Contains(
+    '-TaskSchedulerComputerName $taskSchedulerComputerName')) `
+    'Production promotion does not pass the remote scheduler computer to the migration adapter.'
 
 function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
     try { & $Action; throw 'Expected failure.' } catch {

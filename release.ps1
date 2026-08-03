@@ -399,9 +399,11 @@ function Invoke-PromoteProduction {
                 param([string] $RehearsalDatabase, [string] $SanitizedPath)
                 [void] (& $manualRestoreReader "กด Enter หลัง Import ไปยัง Rehearsal Database $RehearsalDatabase สำหรับ Production Release $ReleaseId สำเร็จ")
             }.GetNewClosure()
+            $taskSchedulerComputerName = Get-D365TaskSchedulerComputerName -ProductionRoot $ProductionRoot
             $MigrationCommandAdapter = New-D365ManualRestoreMigrationAdapter -Manifest $release.Manifest `
                 -SourceProjects $sourceProjects -ProductionRoot $ProductionRoot `
                 -BackupRoot $MigrationBackupRoot -PhpPath $PhpPath -AppliedBy $MigrationAppliedBy `
+                -TaskSchedulerComputerName $taskSchedulerComputerName `
                 -WaitForManualRestore $waitForManualRestore
         }
         $migrationApprovalProvider = $null
