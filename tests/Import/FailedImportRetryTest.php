@@ -157,7 +157,7 @@ return [
             'queue was already imported' => [['queue' => ['imported_at' => '2026-08-03 11:00:00']], 44, $failedImportRetryFileName, $failedImportRetryHash],
             'matching import_files row is missing' => [['import_file' => false], 44, $failedImportRetryFileName, $failedImportRetryHash],
             'matching import_files row is not ERROR' => [['import_file' => ['status' => 'SUCCESS']], 44, $failedImportRetryFileName, $failedImportRetryHash],
-            'matching import_files has duplicate ERROR rows' => [['import_files' => [
+            'matching import_files has duplicate ERROR rows' => [['import_file' => false, 'import_files' => [
                 ['source_file_name' => $failedImportRetryFileName, 'file_hash' => $failedImportRetryHash, 'status' => 'ERROR'],
                 ['source_file_name' => $failedImportRetryFileName, 'file_hash' => $failedImportRetryHash, 'status' => 'ERROR'],
             ]], 44, $failedImportRetryFileName, $failedImportRetryHash],
@@ -229,6 +229,15 @@ return [
 
         (new FailedImportRetry(failedImportRetryFixture(), $strategy))->retry(44, $failedImportRetryFileName, $failedImportRetryHash);
         assert($events->calls === ['isolation', 'begin', 'queue', 'import_files', 'business', 'staging', 'history']);
+    },
+    'failed import retry MySQL strategy emits binary predicates and locking clauses' => function (): void {
+        $strategy = new MysqlFailedImportRetrySql();
+
+        assert($strategy->lockingSuffix('queue') === ' FOR UPDATE');
+        assert($strategy->lockingSuffix('history') === ' FOR UPDATE');
+        assert($strategy->exactEquals('file_name', ':file_name') === 'BINARY file_name = BINARY :file_name');
+        assert($strategy->exactEquals('local_sha256', ':sha256') === 'BINARY local_sha256 = BINARY :sha256');
+        assert($strategy->exactEquals('source_file_name', ':file_name') === 'BINARY source_file_name = BINARY :file_name');
     },
     'failed import retry CLI rejects missing and invalid options before loading configuration' => function (): void {
         $missing = runFailedImportRetryCli([]);
