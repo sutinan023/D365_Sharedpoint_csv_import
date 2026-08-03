@@ -36,7 +36,7 @@
 
 **Interfaces:**
 - Produces: `Get-D365TaskSchedulerComputerName([string] $ProductionRoot) -> string`.
-- Extends: `New-D365ManualRestoreMigrationAdapter(..., [string] $TaskSchedulerComputerName, [scriptblock] $ScheduledTaskCommandAdapter = $null) -> scriptblock`.
+- Extends: `New-D365ManualRestoreMigrationAdapter([object] $Manifest, [IDictionary] $SourceProjects, [string] $ProductionRoot, [string] $BackupRoot, [string] $PhpPath, [string] $AppliedBy, [scriptblock] $WaitForManualRestore, [string] $TaskSchedulerComputerName, [scriptblock] $ScheduledTaskCommandAdapter = $null) -> scriptblock`.
 - Scheduler command adapter consumes one `string[]` argument and returns an object with integer `ExitCode` and string `Output`.
 
 - [ ] **Step 1: Replace local Scheduler fakes with a command-level fake and write failing tests**
@@ -120,7 +120,7 @@ if ($snapshot.Enabled) {
 }
 ```
 
-Store only initially enabled full names. During restoration, re-query each saved name and invoke exact `/Change ... /Enable`; do not restore pre-disabled tasks.
+Store only initially enabled full names. During restoration, re-query each saved name and invoke `@('/Change','/S',$TaskSchedulerComputerName,'/TN',$fullTaskName,'/Enable')`; do not restore pre-disabled tasks.
 
 - [ ] **Step 5: Run focused tests and parser validation**
 
