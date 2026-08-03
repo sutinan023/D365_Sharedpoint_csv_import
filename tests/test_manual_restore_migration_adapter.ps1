@@ -124,9 +124,8 @@ try {
         $disabled.PreviouslyEnabledTasks -ccontains '\D365 File CSV Import [PROD]' -and
         $disabled.PreviouslyEnabledTasks -ccontains '\D365 SharePoint CSV Download Cleanup [PROD]') `
         'Only initially enabled full task names should be saved.'
-    $firstMutation = @($schedulerState.Commands | ForEach-Object -Begin { $i = 0 } -Process { $result = [pscustomobject]@{Index=$i; Command=$_}; $i++; $result } | Where-Object { $_.Command -contains '/End' -or $_.Command -contains '/Change' } | Select-Object -First 1).Index
-    Assert-True (@($schedulerState.Commands | Select-Object -First $firstMutation | Where-Object { $_ -notcontains '/Query' }).Count -eq 0) `
-        'Every task query must finish before the first state-changing command.'
+    $orderedCommands = @($schedulerState.Commands | ForEach-Object -Begin { $i = 0 } -Process { $result = [pscustomobject]@{Index=$i; Command=$_}; $i++; $result })
+    $firstMutation = @($orderedCommands | Where-Object { $_.Command -contains '/End' -or $_.Command -contains '/Change' } | Select-Object -First 1).Index
     Assert-True (@($schedulerState.Commands | Where-Object { [Array]::IndexOf($_, '/S') -lt 0 -or $_[[Array]::IndexOf($_, '/S') + 1] -cne '100.1.1.166' }).Count -eq 0) `
         'Every scheduler command must target 100.1.1.166.'
     foreach ($fullTaskName in @(
@@ -134,10 +133,14 @@ try {
         '\D365 File CSV Import [PROD]',
         '\D365 SharePoint CSV Download Cleanup [PROD]'
     )) {
-        Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Query' -and $_ -contains '/XML' -and $_ -contains $fullTaskName }).Count -eq 1) `
+        $xmlQueries = @($orderedCommands | Where-Object { $_.Command -contains '/Query' -and $_.Command -contains '/XML' -and $_.Command -contains $fullTaskName })
+        $csvQueries = @($orderedCommands | Where-Object { $_.Command -contains '/Query' -and $_.Command -contains '/FO' -and $_.Command -contains 'CSV' -and $_.Command -contains '/NH' -and $_.Command -contains $fullTaskName })
+        Assert-True ($xmlQueries.Count -eq 1) `
             "Task XML query was not recorded exactly once: $fullTaskName"
-        Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Query' -and $_ -contains '/FO' -and $_ -contains 'CSV' -and $_ -contains '/NH' -and $_ -contains $fullTaskName }).Count -eq 1) `
+        Assert-True ($csvQueries.Count -eq 1) `
             "Task CSV query was not recorded exactly once: $fullTaskName"
+        Assert-True ($xmlQueries[0].Index -lt $firstMutation -and $csvQueries[0].Index -lt $firstMutation) `
+            "Task XML and CSV queries must both precede the first state-changing command: $fullTaskName"
     }
     Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/End' -and $_ -contains '\D365 SharePoint CSV Download Cleanup [PROD]' }).Count -eq 1) `
         'The running task was not ended.'
