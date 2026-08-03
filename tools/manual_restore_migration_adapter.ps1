@@ -151,7 +151,10 @@ function New-D365ManualRestoreMigrationAdapter {
         }
 
         $csvOutput = & $invokeCheckedSchtasks -Arguments @('/Query','/S',$TaskSchedulerComputerName,'/TN',$fullTaskName,'/FO','CSV','/NH') -Operation 'query CSV' -TaskName $fullTaskName
-        $csvMatch = [regex]::Match($csvOutput, '^\s*"(?<name>(?:[^"]|"")*)"\s*,\s*"(?:[^"]|"")*"\s*,\s*"(?<state>(?:[^"]|"")*)"\s*,\s*"(?:[^"]|"")*"')
+        $csvMatch = [regex]::Match(
+            $csvOutput,
+            '^\s*"(?<name>(?:[^"]|"")*)"\s*,\s*"(?:[^"]|"")*"\s*,\s*"(?<state>(?:[^"]|"")*)"\s*(?:\r?\n)?$'
+        )
         if (-not $csvMatch.Success) { throw "Task Scheduler returned invalid CSV for task: $fullTaskName" }
         $returnedName = $csvMatch.Groups['name'].Value.Replace('""', '"')
         $stateName = $csvMatch.Groups['state'].Value.Replace('""', '"')

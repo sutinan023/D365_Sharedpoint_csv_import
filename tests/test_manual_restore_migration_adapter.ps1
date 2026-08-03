@@ -13,6 +13,7 @@ $schedulerState = [pscustomobject]@{
     TaskDefinitions = @{}
     XmlOverride = $null
     CsvStateOverride = $null
+    CsvOutputOverride = $null
     FailStateChange = $false
 }
 $script:schedulerCommands = $schedulerState.Commands
@@ -26,6 +27,7 @@ function Reset-FakeSchtasks {
     }
     $schedulerState.XmlOverride = $null
     $schedulerState.CsvStateOverride = $null
+    $schedulerState.CsvOutputOverride = $null
     $schedulerState.FailStateChange = $false
 }
 
@@ -46,8 +48,14 @@ $fakeSchtasks = {
         return [pscustomobject]@{ ExitCode=0; Output=$xml }
     }
     if ($Arguments -contains '/Query' -and $Arguments -contains '/FO') {
+        if ($null -ne $schedulerState.CsvOutputOverride) {
+            return [pscustomobject]@{ ExitCode=0; Output=$schedulerState.CsvOutputOverride }
+        }
         $state = if ($null -ne $schedulerState.CsvStateOverride) { $schedulerState.CsvStateOverride } else { $task.State }
-        return [pscustomobject]@{ ExitCode=0; Output=('"{0}","N/A","{1}","Interactive/Background"' -f $taskName, $state) }
+        return [pscustomobject]@{
+            ExitCode = 0
+            Output = ('"{0}","N/A","{1}"' -f $taskName, $state)
+        }
     }
     if ($Arguments -contains '/End') {
         if ($schedulerState.FailStateChange) { return [pscustomobject]@{ ExitCode=1; Output='State change failed.' } }
@@ -152,6 +160,18 @@ try {
         'Restore must enable only tasks that were initially enabled.'
     Assert-True (-not $schedulerState.TaskDefinitions['\D365 SharePoint CSV Import [PROD]'].Enabled) `
         'A task initially disabled must remain disabled after restoration.'
+
+    foreach ($csvOutput in @(
+        '"\D365 File CSV Import [PROD]","N/A"',
+        '"\D365 File CSV Import [PROD]","N/A","Ready","Interactive/Background"',
+        '"\Wrong [PROD]","N/A","Ready"',
+        '"\D365 File CSV Import [PROD]","N/A","Unknown"'
+    )) {
+        Reset-FakeSchtasks
+        $schedulerState.CsvOutputOverride = $csvOutput
+        Assert-Throws { & $adapter 'disable-production-tasks' @{TaskNames=@('D365 File CSV Import [PROD]')} | Out-Null } 'Task Scheduler returned invalid CSV|Task Scheduler CSV task name does not match requested task|Task Scheduler returned an invalid state'
+        Assert-NoStateChanges "State-changing command ran for invalid CSV output: $csvOutput"
+    }
 
     foreach ($failure in @('missing-task','invalid-xml','uri-mismatch','unknown-state')) {
         Reset-FakeSchtasks
