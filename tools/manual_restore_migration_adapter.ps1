@@ -99,23 +99,29 @@ function New-D365ManualRestoreMigrationAdapter {
     if (-not (Test-Path -LiteralPath $PhpPath -PathType Leaf)) { throw "PHP executable not found: $PhpPath" }
     if ($AppliedBy -notmatch '^[A-Za-z0-9_.@-]+$') { throw 'Migration applied-by value contains unsafe characters.' }
     $productionProjectRoot = Join-Path $ProductionRoot 'D365_Sharedpoint_csv_import'
-    $state = @{ PreviouslyEnabledTasks=@(); ApplyResults=@() }
+    $state = @{ PreviouslyEnabledTasks=@(); PreviouslyEnabledTaskObjects=@(); ApplyResults=@() }
     return {
         param([string] $Stage, [hashtable] $Context)
         switch ($Stage) {
             'disable-production-tasks' {
                 $tasks = @()
                 foreach ($taskName in $Context.TaskNames) {
-                    $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
-                    if ($null -eq $task) { throw "Production Scheduled Task not found: $taskName" }
-                    $tasks += $task
+                    $matches = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
+                        [string]::Equals([string] $_.TaskName, [string] $taskName, [StringComparison]::Ordinal)
+                    })
+                    if ($matches.Count -ne 1) {
+                        throw "Production Scheduled Task must resolve to exactly one literal name: $taskName ($($matches.Count) matches)"
+                    }
+                    $tasks += $matches[0]
                 }
-                $enabled = @($tasks | Where-Object State -cne 'Disabled' | ForEach-Object TaskName)
+                $enabledTasks = @($tasks | Where-Object State -cne 'Disabled')
+                $enabled = @($enabledTasks | ForEach-Object TaskName)
                 foreach ($task in $tasks) {
-                    if ($task.State -ceq 'Running') { Stop-ScheduledTask -TaskName $task.TaskName }
-                    if ($task.State -cne 'Disabled') { Disable-ScheduledTask -TaskName $task.TaskName | Out-Null }
+                    if ($task.State -ceq 'Running') { Stop-ScheduledTask -InputObject $task }
+                    if ($task.State -cne 'Disabled') { Disable-ScheduledTask -InputObject $task | Out-Null }
                 }
                 $state.PreviouslyEnabledTasks = $enabled
+                $state.PreviouslyEnabledTaskObjects = $enabledTasks
                 return [pscustomobject]@{Success=$true;PreviouslyEnabledTasks=$enabled}
             }
             'checkpoint-production' {
@@ -176,7 +182,7 @@ function New-D365ManualRestoreMigrationAdapter {
             }
             'verify-production' { return [pscustomobject]@{Success=$true} }
             'restore-production-task-states' {
-                foreach ($taskName in $state.PreviouslyEnabledTasks) { Enable-ScheduledTask -TaskName $taskName | Out-Null }
+                foreach ($task in $state.PreviouslyEnabledTaskObjects) { Enable-ScheduledTask -InputObject $task | Out-Null }
                 return [pscustomobject]@{Success=$true;RestoredTasks=@($state.PreviouslyEnabledTasks)}
             }
             default { throw "Unsupported migration stage: $Stage" }

@@ -8,6 +8,57 @@ function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
 }
 function Assert-True([bool] $Condition, [string] $Message) { if (-not $Condition) { throw $Message } }
 
+$script:fakeScheduledTasks = @()
+$script:scheduledTaskOperations = [Collections.Generic.List[string]]::new()
+
+function Get-ScheduledTask {
+    [CmdletBinding()]
+    param([string] $TaskName)
+
+    if ($PSBoundParameters.ContainsKey('TaskName')) {
+        return @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })
+    }
+    return @($script:fakeScheduledTasks)
+}
+
+function Stop-ScheduledTask {
+    [CmdletBinding(DefaultParameterSetName = 'Name')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Input')][object] $InputObject,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Name')][string] $TaskName
+    )
+
+    $task = if ($PSCmdlet.ParameterSetName -ceq 'Input') { $InputObject } else { @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })[0] }
+    $script:scheduledTaskOperations.Add("$($PSCmdlet.ParameterSetName):Stop:$($task.TaskName)")
+    $task.State = 'Ready'
+}
+
+function Disable-ScheduledTask {
+    [CmdletBinding(DefaultParameterSetName = 'Name')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Input')][object] $InputObject,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Name')][string] $TaskName
+    )
+
+    $task = if ($PSCmdlet.ParameterSetName -ceq 'Input') { $InputObject } else { @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })[0] }
+    $script:scheduledTaskOperations.Add("$($PSCmdlet.ParameterSetName):Disable:$($task.TaskName)")
+    $task.State = 'Disabled'
+    return $task
+}
+
+function Enable-ScheduledTask {
+    [CmdletBinding(DefaultParameterSetName = 'Name')]
+    param(
+        [Parameter(Mandatory = $true, ParameterSetName = 'Input')][object] $InputObject,
+        [Parameter(Mandatory = $true, ParameterSetName = 'Name')][string] $TaskName
+    )
+
+    $task = if ($PSCmdlet.ParameterSetName -ceq 'Input') { $InputObject } else { @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })[0] }
+    $script:scheduledTaskOperations.Add("$($PSCmdlet.ParameterSetName):Enable:$($task.TaskName)")
+    $task.State = 'Ready'
+    return $task
+}
+
 $root = Join-Path ([IO.Path]::GetTempPath()) ('manual-migration-adapter-{0}' -f [guid]::NewGuid())
 try {
     New-Item -ItemType Directory -Path $root | Out-Null
@@ -48,6 +99,47 @@ try {
         'Manual restore instructions exposed internal artifacts.'
     & $adapter 'wait-for-manual-restore' $context | Out-Null
     Assert-True ($waitEvents.Count -eq 1) 'Manual restore wait callback was not invoked.'
+
+    $literalTaskName = 'D365 SharePoint CSV Import [PROD]'
+    $decoyTaskName = 'D365 SharePoint CSV Import P'
+    $previouslyDisabledTaskName = 'D365 CSV Cleanup [PROD]'
+    $previouslyDisabledDecoyTaskName = 'D365 CSV Cleanup P'
+    $script:fakeScheduledTasks = @(
+        [pscustomobject]@{TaskName=$literalTaskName;TaskPath='\';State='Running'},
+        [pscustomobject]@{TaskName=$decoyTaskName;TaskPath='\';State='Ready'},
+        [pscustomobject]@{TaskName=$previouslyDisabledTaskName;TaskPath='\';State='Disabled'},
+        [pscustomobject]@{TaskName=$previouslyDisabledDecoyTaskName;TaskPath='\';State='Ready'}
+    )
+    $script:scheduledTaskOperations.Clear()
+    $disabled = & $adapter 'disable-production-tasks' @{TaskNames=@($literalTaskName, $previouslyDisabledTaskName)}
+    Assert-True (@($disabled.PreviouslyEnabledTasks).Count -eq 1 -and $disabled.PreviouslyEnabledTasks[0] -ceq $literalTaskName) `
+        'Literal [PROD] task was not resolved before the wildcard decoy.'
+    Assert-True ($script:fakeScheduledTasks[0].State -ceq 'Disabled' -and $script:fakeScheduledTasks[1].State -ceq 'Ready') `
+        'Literal task was not stopped and disabled without changing its decoy.'
+    Assert-True ($script:fakeScheduledTasks[2].State -ceq 'Disabled' -and $script:fakeScheduledTasks[3].State -ceq 'Ready') `
+        'Previously disabled literal task or its decoy changed state.'
+    Assert-True (@($script:scheduledTaskOperations | Where-Object { $_ -notmatch '^Input:' }).Count -eq 0) `
+        'Scheduled Task control did not use resolved task objects.'
+    $restored = & $adapter 'restore-production-task-states' @{}
+    Assert-True (@($restored.RestoredTasks).Count -eq 1 -and $restored.RestoredTasks[0] -ceq $literalTaskName) `
+        'Restore result did not preserve the previously enabled literal task.'
+    Assert-True ($script:fakeScheduledTasks[0].State -ceq 'Ready' -and $script:fakeScheduledTasks[2].State -ceq 'Disabled') `
+        'Restore did not re-enable only the task enabled before cutover.'
+    Assert-True (@($script:scheduledTaskOperations | Where-Object { $_ -notmatch '^Input:' }).Count -eq 0) `
+        'Scheduled Task restore did not use resolved task objects.'
+
+    $script:fakeScheduledTasks = @()
+    $script:scheduledTaskOperations.Clear()
+    Assert-Throws { & $adapter 'disable-production-tasks' @{TaskNames=@($literalTaskName)} | Out-Null } 'exactly one'
+    Assert-True ($script:scheduledTaskOperations.Count -eq 0) 'Task controls ran when a requested task had no exact match.'
+
+    $script:fakeScheduledTasks = @(
+        [pscustomobject]@{TaskName=$literalTaskName;TaskPath='\One\';State='Ready'},
+        [pscustomobject]@{TaskName=$literalTaskName;TaskPath='\Two\';State='Ready'}
+    )
+    $script:scheduledTaskOperations.Clear()
+    Assert-Throws { & $adapter 'disable-production-tasks' @{TaskNames=@($literalTaskName)} | Out-Null } 'exactly one'
+    Assert-True ($script:scheduledTaskOperations.Count -eq 0) 'Task controls ran when a requested task had duplicate exact matches.'
     Assert-Throws {
         New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
             -ProductionRoot (Join-Path $root 'prod') -BackupRoot (Join-Path $root 'backup') `
