@@ -15,6 +15,9 @@ final class FailedImportRetry
 
     public function retry(int $id, string $fileName, string $sha256): array
     {
+        if ($this->isMySql()) {
+            $this->pdo->exec('SET TRANSACTION ISOLATION LEVEL SERIALIZABLE');
+        }
         $this->pdo->beginTransaction();
 
         try {
@@ -29,17 +32,25 @@ final class FailedImportRetry
 
             $this->requireErroredImportFile($fileName, $sha256);
             $this->requireNoRows(
-                'SELECT COUNT(*) FROM payment_before_post WHERE source_file_name = :file_name AND file_hash = :sha256',
+                'SELECT 1 FROM payment_before_post WHERE '
+                . $this->exactEquals('source_file_name', ':file_name')
+                . ' AND ' . $this->exactEquals('file_hash', ':sha256')
+                . ' LIMIT 1' . $this->lockingSuffix(),
                 [':file_name' => $fileName, ':sha256' => $sha256],
                 'Business rows exist for the failed import.'
             );
             $this->requireNoRows(
-                'SELECT COUNT(*) FROM stg_payment_before_post WHERE source_file_name = :file_name AND file_hash = :sha256',
+                'SELECT 1 FROM stg_payment_before_post WHERE '
+                . $this->exactEquals('source_file_name', ':file_name')
+                . ' AND ' . $this->exactEquals('file_hash', ':sha256')
+                . ' LIMIT 1' . $this->lockingSuffix(),
                 [':file_name' => $fileName, ':sha256' => $sha256],
                 'Staging rows exist for the failed import.'
             );
             $this->requireNoRows(
-                'SELECT COUNT(*) FROM payment_before_post_history WHERE source_file_name = :file_name',
+                'SELECT 1 FROM payment_before_post_history WHERE '
+                . $this->exactEquals('source_file_name', ':file_name')
+                . ' LIMIT 1' . $this->lockingSuffix(),
                 [':file_name' => $fileName],
                 'History rows exist for the failed import.'
             );
@@ -48,9 +59,9 @@ final class FailedImportRetry
                 "UPDATE sharepoint_file_queue
                  SET status = 'MOVED', last_error = NULL, import_started_at = NULL, updated_at = CURRENT_TIMESTAMP
                  WHERE id = :id
-                   AND file_name = :file_name
-                   AND local_sha256 = :sha256
-                   AND status = 'IMPORT_ERROR'
+                   AND " . $this->exactEquals('file_name', ':file_name') . "
+                   AND " . $this->exactEquals('local_sha256', ':sha256') . "
+                   AND " . $this->exactEquals('status', "'IMPORT_ERROR'") . "
                    AND imported_at IS NULL"
             );
             $update->execute([':id' => $id, ':file_name' => $fileName, ':sha256' => $sha256]);
@@ -79,6 +90,7 @@ final class FailedImportRetry
     {
         $query = $this->pdo->prepare(
             'SELECT file_name, local_sha256, status, imported_at FROM sharepoint_file_queue WHERE id = :id'
+            . $this->lockingSuffix()
         );
         $query->execute([':id' => $id]);
 
@@ -88,12 +100,15 @@ final class FailedImportRetry
     private function requireErroredImportFile(string $fileName, string $sha256): void
     {
         $query = $this->pdo->prepare(
-            "SELECT COUNT(*) FROM import_files
-             WHERE source_file_name = :file_name AND file_hash = :sha256 AND status = 'ERROR'"
+            'SELECT status FROM import_files WHERE '
+            . $this->exactEquals('source_file_name', ':file_name')
+            . ' AND ' . $this->exactEquals('file_hash', ':sha256')
+            . $this->lockingSuffix()
         );
         $query->execute([':file_name' => $fileName, ':sha256' => $sha256]);
 
-        if ((int) $query->fetchColumn() !== 1) {
+        $statuses = $query->fetchAll(PDO::FETCH_COLUMN);
+        if (count($statuses) !== 1 || $statuses[0] !== 'ERROR') {
             throw new RuntimeException('No unique ERROR import record matches the failed queue row.');
         }
     }
@@ -103,8 +118,27 @@ final class FailedImportRetry
         $query = $this->pdo->prepare($sql);
         $query->execute($parameters);
 
-        if ((int) $query->fetchColumn() !== 0) {
+        if ($query->fetchColumn() !== false) {
             throw new RuntimeException($message);
         }
+    }
+
+    private function exactEquals(string $column, string $parameter): string
+    {
+        if ($this->isMySql()) {
+            return "BINARY {$column} = BINARY {$parameter}";
+        }
+
+        return "{$column} = {$parameter}";
+    }
+
+    private function lockingSuffix(): string
+    {
+        return $this->isMySql() ? ' FOR UPDATE' : '';
+    }
+
+    private function isMySql(): bool
+    {
+        return $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'mysql';
     }
 }
