@@ -25,5 +25,31 @@ if ($scriptSource -notmatch 'checkpoint_baseline\.php' -or $scriptSource -notmat
 if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot '..\tools\checkpoint_baseline.php'))) {
     throw 'Checkpoint baseline CLI is missing.'
 }
+if ($scriptSource -notmatch '\$dumpBytes\s*=\s*\[IO\.File\]::ReadAllBytes\(\$backupFile\)') {
+    throw 'Database checkpoint does not read the completed dump as bytes.'
+}
+if ($scriptSource -notmatch '\$dumpText\s*=\s*\(New-Object Text\.UTF8Encoding\(\$false,\s*\$true\)\)\.GetString\(\$dumpBytes\)') {
+    throw 'Database checkpoint does not decode the dump as strict UTF-8.'
+}
+if ($scriptSource -notmatch '\$dumpQualifierPattern\s*=\s*\x27\x60\x27\s*\+\s*\[regex\]::Escape\(\$database\)\s*\+\s*\x27\x60\\\.\x27') {
+    throw 'Database checkpoint does not build the exact dump qualifier pattern.'
+}
+if ($scriptSource -notmatch '\$dumpQualifiedReferenceCount\s*=\s*\[regex\]::Matches\(' -or
+    $scriptSource -notmatch '\$dumpText,\s*\$dumpQualifierPattern,\s*\[Text\.RegularExpressions\.RegexOptions\]::IgnoreCase\s*\)\.Count') {
+    throw 'Database checkpoint does not count dump qualifiers case-insensitively.'
+}
+if ($scriptSource -notmatch '\$baseline\s*\|\s*Add-Member\s+-NotePropertyName\s+dump_qualified_reference_count\s+`?\s*-NotePropertyValue\s+\(\[int\]\s*\$dumpQualifiedReferenceCount\)') {
+    throw 'Database checkpoint does not bind dump_qualified_reference_count as a native integer.'
+}
+if ($scriptSource -notmatch 'catch\s+\[Text\.DecoderFallbackException\]\s*\{\s*throw\s+[\x27\x22]Database checkpoint dump must be valid UTF-8\.[\x27\x22]\s*\}') {
+    throw 'Database checkpoint does not reject invalid dump UTF-8.'
+}
+if ($scriptSource -notmatch 'verification_baseline\s*=\s*\$baseline') {
+    throw 'Database checkpoint does not preserve the baseline object in the manifest.'
+}
+if ($scriptSource -match 'Add-Member\s+-NotePropertyName\s+qualified_reference_count' -or
+    $scriptSource -match '\$baseline\.qualified_reference_count\s*=') {
+    throw 'Database checkpoint overwrites the live qualified_reference_count baseline.'
+}
 
 Write-Host 'Database checkpoint plan checks passed.'

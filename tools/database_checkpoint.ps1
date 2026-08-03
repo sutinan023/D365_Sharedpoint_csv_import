@@ -98,6 +98,20 @@ if (-not (Test-Path -LiteralPath $backupFile) -or (Get-Item -LiteralPath $backup
     throw 'Database checkpoint file is missing or empty.'
 }
 
+$dumpBytes = [IO.File]::ReadAllBytes($backupFile)
+try {
+    $dumpText = (New-Object Text.UTF8Encoding($false, $true)).GetString($dumpBytes)
+}
+catch [Text.DecoderFallbackException] {
+    throw 'Database checkpoint dump must be valid UTF-8.'
+}
+$dumpQualifierPattern = '`' + [regex]::Escape($database) + '`\.'
+$dumpQualifiedReferenceCount = [regex]::Matches(
+    $dumpText,
+    $dumpQualifierPattern,
+    [Text.RegularExpressions.RegexOptions]::IgnoreCase
+).Count
+
 $phpExecutable = 'C:\xampp\php\php.exe'
 $baselineScript = Join-Path $ProjectRoot 'tools\checkpoint_baseline.php'
 foreach ($requiredPath in @($phpExecutable, $baselineScript)) {
@@ -113,6 +127,11 @@ try { $baseline = $baselineJson | ConvertFrom-Json } catch { throw 'Checkpoint b
 if ([string] $baseline.database -cne 'D365_finance_prod') {
     throw 'Checkpoint baseline selected the wrong database.'
 }
+if ($baseline.PSObject.Properties['dump_qualified_reference_count']) {
+    throw 'Checkpoint baseline already contains dump_qualified_reference_count.'
+}
+$baseline | Add-Member -NotePropertyName dump_qualified_reference_count `
+    -NotePropertyValue ([int] $dumpQualifiedReferenceCount)
 
 [pscustomobject]@{
     database = $database
