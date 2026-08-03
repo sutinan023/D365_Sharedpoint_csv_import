@@ -93,6 +93,7 @@ if ($actualSourceHash -cne $ExpectedSourceSha256.ToLowerInvariant()) {
     throw 'Source backup hash does not match the expected SHA-256 value.'
 }
 $checkpointManifestHash = $null
+$LiveQualifiedReferenceCount = $null
 if ($UseCheckpointBaseline) {
     if ([string]::IsNullOrWhiteSpace($BackupManifestPath) -or -not (Test-Path -LiteralPath $BackupManifestPath -PathType Leaf)) {
         throw 'Checkpoint baseline mode requires BackupManifestPath.'
@@ -107,11 +108,14 @@ if ($UseCheckpointBaseline) {
     $baseline = $checkpoint.verification_baseline
     if ($null -eq $baseline -or $baseline.definer_count -isnot [int] -or
         $baseline.qualified_reference_count -isnot [int] -or
-        $baseline.definer_count -lt 0 -or $baseline.qualified_reference_count -lt 0) {
+        $baseline.dump_qualified_reference_count -isnot [int] -or
+        $baseline.definer_count -lt 0 -or $baseline.qualified_reference_count -lt 0 -or
+        $baseline.dump_qualified_reference_count -lt 0) {
         throw 'Checkpoint verification baseline counts are invalid.'
     }
     $ExpectedDefinerCount = [int] $baseline.definer_count
-    $ExpectedQualifiedReferenceCount = [int] $baseline.qualified_reference_count
+    $LiveQualifiedReferenceCount = [int] $baseline.qualified_reference_count
+    $ExpectedQualifiedReferenceCount = [int] $baseline.dump_qualified_reference_count
     $checkpointManifestHash = $checkpointSnapshot.Hash
 } elseif ($null -eq $ExpectedDefinerCount -or $null -eq $ExpectedQualifiedReferenceCount -or
           $ExpectedDefinerCount -lt 0 -or $ExpectedQualifiedReferenceCount -lt 0) {
@@ -374,6 +378,7 @@ $audit = [ordered]@{
     source_size_bytes = $sourceBytes.Length
     sanitized_size_bytes = (Get-Item -LiteralPath $outputFullPath).Length
     definer_count = $definerCount
+    live_qualified_reference_count = $LiveQualifiedReferenceCount
     qualified_reference_count = $qualifiedReferenceCount
     checkpoint_manifest_sha256 = $checkpointManifestHash
 }

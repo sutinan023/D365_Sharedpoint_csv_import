@@ -61,16 +61,48 @@ try {
         database = 'D365_finance'
         backup_file = $sourcePath
         sha256 = $sourceHash
-        verification_baseline = [ordered]@{ definer_count=2; qualified_reference_count=22 }
+        verification_baseline = [ordered]@{
+            definer_count = 2
+            qualified_reference_count = 24
+            dump_qualified_reference_count = 22
+        }
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $checkpointPath -Encoding UTF8
     $automaticOutputPath = Join-Path $testRoot 'automatic-sanitized.sql'
     & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash `
         -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260802_1' `
         -OutputPath $automaticOutputPath -UseCheckpointBaseline -BackupManifestPath $checkpointPath | Out-Null
     if (-not (Test-Path -LiteralPath $automaticOutputPath -PathType Leaf)) { throw 'Checkpoint baseline mode did not create sanitized SQL.' }
+    $automaticSanitized = [IO.File]::ReadAllText($automaticOutputPath)
+    if (([regex]::Matches($automaticSanitized, '`D365_finance_rehearsal_20260802_1`\.')).Count -ne 22) { throw 'Checkpoint baseline mode wrote the wrong rehearsal qualifier count.' }
+    if ($automaticSanitized -match '`D365_finance`\.') { throw 'Checkpoint baseline mode retained source qualifiers.' }
     $automaticAudit = Get-Content -Raw -LiteralPath "$automaticOutputPath.audit.json" | ConvertFrom-Json
     if ($automaticAudit.checkpoint_manifest_sha256 -cne (Get-FileHash -LiteralPath $checkpointPath -Algorithm SHA256).Hash.ToLowerInvariant()) {
         throw 'Sanitizer audit did not bind the checkpoint manifest.'
+    }
+    if ($automaticAudit.live_qualified_reference_count -ne 24 -or $automaticAudit.qualified_reference_count -ne 22) {
+        throw 'Sanitizer audit did not preserve separate live and dump qualifier counts.'
+    }
+
+    foreach ($invalidDumpCount in @(
+        [pscustomobject]@{ Name='missing'; Include=$false; Value=$null; ExpectedError='baseline counts are invalid' },
+        [pscustomobject]@{ Name='negative'; Include=$true; Value=-1; ExpectedError='baseline counts are invalid' },
+        [pscustomobject]@{ Name='string'; Include=$true; Value='22'; ExpectedError='baseline counts are invalid' },
+        [pscustomobject]@{ Name='mismatch'; Include=$true; Value=23; ExpectedError='Unexpected qualified reference count' }
+    )) {
+        $invalidCheckpointPath = Join-Path $testRoot ("invalid-dump-count-{0}.json" -f $invalidDumpCount.Name)
+        $invalidBaseline = [ordered]@{ definer_count=2; qualified_reference_count=24 }
+        if ($invalidDumpCount.Include) { $invalidBaseline.dump_qualified_reference_count = $invalidDumpCount.Value }
+        [ordered]@{
+            database = 'D365_finance'
+            backup_file = $sourcePath
+            sha256 = $sourceHash
+            verification_baseline = $invalidBaseline
+        } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $invalidCheckpointPath -Encoding UTF8
+        $invalidOutputPath = Join-Path $testRoot ("invalid-dump-count-{0}.sql" -f $invalidDumpCount.Name)
+        Assert-Throws { & $scriptPath -BackupPath $sourcePath -ExpectedSourceSha256 $sourceHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260802_1' -OutputPath $invalidOutputPath -UseCheckpointBaseline -BackupManifestPath $invalidCheckpointPath } $invalidDumpCount.ExpectedError
+        if ((Test-Path -LiteralPath $invalidOutputPath) -or (Test-Path -LiteralPath "$invalidOutputPath.audit.json")) {
+            throw "Invalid dump count checkpoint left rehearsal artifacts behind: $($invalidDumpCount.Name)"
+        }
     }
 
     $badCheckpointPath = Join-Path $testRoot 'bad-checkpoint.json'

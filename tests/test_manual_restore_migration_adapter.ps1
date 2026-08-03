@@ -84,7 +84,7 @@ try {
     $checkpointPath = "$backupSql.json"
     [ordered]@{
         database='D365_finance_prod';release_id='r1';backup_file=$backupSql;sha256=$backupHash
-        verification_baseline=[ordered]@{definer_count=0;qualified_reference_count=0}
+        verification_baseline=[ordered]@{definer_count=0;qualified_reference_count=0;dump_qualified_reference_count=0}
     } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $checkpointPath -Encoding UTF8
     $prepared = Start-D365ManualRestoreWizard -ReleaseId 'r1' -BackupManifestPath $checkpointPath
     Assert-True ($prepared.RehearsalDatabase -ceq 'D365_finance_prod_rehearsal_r1') 'Automatic rehearsal database name is wrong.'
