@@ -1,6 +1,32 @@
 <?php
 
 use App\Import\FailedImportRetry;
+use App\Import\FailedImportRetryCli;
+use App\Import\FailedImportRetrySql;
+use App\Import\MysqlFailedImportRetrySql;
+
+final class RecordingTransactionPdo extends PDO
+{
+    public array $calls = [];
+
+    public function __construct()
+    {
+    }
+
+    public function exec(string $statement): int|false
+    {
+        $this->calls[] = ['exec', $statement];
+
+        return 0;
+    }
+
+    public function beginTransaction(): bool
+    {
+        $this->calls[] = ['begin'];
+
+        return true;
+    }
+}
 
 function failedImportRetryFixture(array $changes = []): PDO
 {
@@ -10,7 +36,8 @@ function failedImportRetryFixture(array $changes = []): PDO
         id INTEGER PRIMARY KEY, file_name TEXT, local_sha256 TEXT, status TEXT,
         last_error TEXT, import_started_at TEXT, imported_at TEXT, updated_at TEXT
     )');
-    $pdo->exec('CREATE TABLE import_files (source_file_name TEXT, file_hash TEXT, status TEXT)');
+    $importFileCollation = ($changes['case_insensitive_import_files'] ?? false) ? ' COLLATE NOCASE' : '';
+    $pdo->exec('CREATE TABLE import_files (source_file_name TEXT' . $importFileCollation . ', file_hash TEXT' . $importFileCollation . ', status TEXT)');
     $pdo->exec('CREATE TABLE payment_before_post (source_file_name TEXT, file_hash TEXT)');
     $pdo->exec('CREATE TABLE stg_payment_before_post (source_file_name TEXT, file_hash TEXT)');
     $pdo->exec('CREATE TABLE payment_before_post_history (source_file_name TEXT)');
@@ -28,17 +55,18 @@ function failedImportRetryFixture(array $changes = []): PDO
         id, file_name, local_sha256, status, last_error, import_started_at, imported_at
     ) VALUES (:id, :file_name, :local_sha256, :status, :last_error, :import_started_at, :imported_at)')->execute($queue);
 
+    $importFiles = $changes['import_files'] ?? [];
     if (($changes['import_file'] ?? true) !== false) {
         $importFile = array_replace([
             'source_file_name' => $queue['file_name'],
             'file_hash' => $queue['local_sha256'],
             'status' => 'ERROR',
         ], is_array($changes['import_file'] ?? null) ? $changes['import_file'] : []);
-        $importFiles = $changes['import_files'] ?? [$importFile];
-        foreach ($importFiles as $row) {
-            $pdo->prepare('INSERT INTO import_files (source_file_name, file_hash, status)
-                VALUES (:source_file_name, :file_hash, :status)')->execute($row);
-        }
+        array_unshift($importFiles, $importFile);
+    }
+    foreach ($importFiles as $row) {
+        $pdo->prepare('INSERT INTO import_files (source_file_name, file_hash, status)
+            VALUES (:source_file_name, :file_hash, :status)')->execute($row);
     }
 
     foreach (($changes['business_rows'] ?? []) as $row) {
@@ -154,22 +182,53 @@ return [
 
         $importFixture = failedImportRetryFixture([
             'import_file' => false,
+            'case_insensitive_import_files' => true,
             'import_files' => [[
                 'source_file_name' => $differentCaseName,
                 'file_hash' => $differentCaseHash,
                 'status' => 'ERROR',
             ]],
         ]);
+        assert((int) $importFixture->query('SELECT COUNT(*) FROM import_files')->fetchColumn() === 1);
         assertFailedImportRetryRejected($importFixture, 44, $failedImportRetryFileName, $failedImportRetryHash);
     },
-    'failed import retry has a MySQL serialization and binary-comparison contract for every predicate' => function (): void {
-        $source = file_get_contents(dirname(__DIR__, 2) . '/src/Import/FailedImportRetry.php');
+    'failed import retry MySQL strategy sets isolation before begin and locks every evidence query' => function () use ($failedImportRetryFileName, $failedImportRetryHash): void {
+        $boundary = new RecordingTransactionPdo();
+        (new MysqlFailedImportRetrySql())->begin($boundary);
+        assert($boundary->calls === [
+            ['exec', 'SET TRANSACTION ISOLATION LEVEL SERIALIZABLE'],
+            ['begin'],
+        ]);
 
-        assert(str_contains($source, "SET TRANSACTION ISOLATION LEVEL SERIALIZABLE"));
-        assert(str_contains($source, "return \$this->isMySql() ? ' FOR UPDATE' : '';"));
-        assert(substr_count($source, '$this->lockingSuffix()') === 5);
-        assert(str_contains($source, 'return "BINARY {$column} = BINARY {$parameter}";'));
-        assert(substr_count($source, 'exactEquals(') === 11);
+        $events = new stdClass();
+        $events->calls = [];
+        $strategy = new class($events) implements FailedImportRetrySql {
+            public function __construct(private readonly stdClass $events)
+            {
+            }
+
+            public function begin(PDO $pdo): void
+            {
+                $this->events->calls[] = 'isolation';
+                $pdo->beginTransaction();
+                $this->events->calls[] = 'begin';
+            }
+
+            public function exactEquals(string $column, string $parameter): string
+            {
+                return "CAST({$column} AS BLOB) = CAST({$parameter} AS BLOB)";
+            }
+
+            public function lockingSuffix(string $purpose): string
+            {
+                $this->events->calls[] = $purpose;
+
+                return '';
+            }
+        };
+
+        (new FailedImportRetry(failedImportRetryFixture(), $strategy))->retry(44, $failedImportRetryFileName, $failedImportRetryHash);
+        assert($events->calls === ['isolation', 'begin', 'queue', 'import_files', 'business', 'staging', 'history']);
     },
     'failed import retry CLI rejects missing and invalid options before loading configuration' => function (): void {
         $missing = runFailedImportRetryCli([]);
@@ -178,17 +237,57 @@ return [
         $invalid = runFailedImportRetryCli(['--apply', '--id=0', '--file=retry.csv', '--sha256=not-a-hash']);
         assert($invalid === ['exit' => 2, 'stdout' => '', 'stderr' => 'Invalid retry identifier or SHA-256.' . PHP_EOL]);
     },
-    'failed import retry CLI fails closed with a generic error before the service on this non-Production checkout' => function () use ($failedImportRetryHash): void {
-        $result = runFailedImportRetryCli([
-            '--apply', '--id=44', '--file=retry.csv', '--sha256=' . $failedImportRetryHash,
-        ]);
-        $source = file_get_contents(dirname(__DIR__, 2) . '/tools/retry_failed_import.php');
+    'failed import retry CLI guards prevent connection and retry until Production database checks pass' => function () use ($failedImportRetryHash): void {
+        $cli = new FailedImportRetryCli();
+        $options = ['apply' => false, 'id' => '44', 'file' => 'retry.csv', 'sha256' => $failedImportRetryHash];
+        $connectorCalls = 0;
+        $retryCalls = 0;
 
-        assert($result === ['exit' => 1, 'stdout' => '', 'stderr' => 'Failed-import retry was not applied.' . PHP_EOL]);
-        assert(strpos($source, 'EnvironmentGuard::validate') < strpos($source, 'new FailedImportRetry'));
-        assert(str_contains($source, "\$environment['APP_ENV'] !== 'PRODUCTION'"));
-        assert(str_contains($source, "\$environment['DB_NAME'] !== 'D365_finance_prod'"));
-        assert(str_contains($source, "SELECT DATABASE()"));
-        assert(!str_contains($source, 'catch (Throwable $'));
+        $wrongEnvironment = $cli->run($options, static fn (): array => ['APP_ENV' => 'UAT', 'DB_NAME' => 'D365_finance'],
+            function () use (&$connectorCalls): object { $connectorCalls++; throw new RuntimeException('connector should not run'); },
+            function () use (&$retryCalls): array { $retryCalls++; return []; });
+        assert($wrongEnvironment === ['exit' => 1, 'stdout' => '', 'stderr' => 'Failed-import retry was not applied.' . PHP_EOL]);
+        assert($connectorCalls === 0 && $retryCalls === 0);
+
+        $wrongDatabase = $cli->run($options, static fn (): array => ['APP_ENV' => 'PRODUCTION', 'DB_NAME' => 'D365_finance'],
+            function () use (&$connectorCalls): object { $connectorCalls++; throw new RuntimeException('connector should not run'); },
+            function () use (&$retryCalls): array { $retryCalls++; return []; });
+        assert($wrongDatabase === ['exit' => 1, 'stdout' => '', 'stderr' => 'Failed-import retry was not applied.' . PHP_EOL]);
+        assert($connectorCalls === 0 && $retryCalls === 0);
+
+        $mismatchConnection = new class {
+            public function query(string $sql): object {
+                return new class {
+                    public function fetchColumn(): string { return 'other_database'; }
+                };
+            }
+        };
+        $databaseMismatch = $cli->run($options, static fn (): array => ['APP_ENV' => 'PRODUCTION', 'DB_NAME' => 'D365_finance_prod'],
+            function () use (&$connectorCalls, $mismatchConnection): object { $connectorCalls++; return $mismatchConnection; },
+            function () use (&$retryCalls): array { $retryCalls++; return []; });
+        assert($databaseMismatch === ['exit' => 1, 'stdout' => '', 'stderr' => 'Failed-import retry was not applied.' . PHP_EOL]);
+        assert($connectorCalls === 1 && $retryCalls === 0);
+
+        $productionConnection = new class {
+            public function query(string $sql): object {
+                return new class {
+                    public function fetchColumn(): string { return 'D365_finance_prod'; }
+                };
+            }
+        };
+        $valid = $cli->run($options, static fn (): array => ['APP_ENV' => 'PRODUCTION', 'DB_NAME' => 'D365_finance_prod'],
+            static fn (): object => $productionConnection,
+            function (object $connection, int $id, string $file, string $sha256) use (&$retryCalls): array {
+                $retryCalls++;
+                assert($id === 44 && $file === 'retry.csv' && $sha256 === '3605a718e95097fe1c90e3d7892a20d23f5b7b3d8c48050e92be7ff146039cd8');
+                return ['id' => 44, 'old_status' => 'IMPORT_ERROR', 'new_status' => 'MOVED', 'sha256' => $sha256];
+            });
+        assert($valid === ['exit' => 0, 'stdout' => '{"id":44,"old_status":"IMPORT_ERROR","new_status":"MOVED","sha256":"3605a718e95097fe1c90e3d7892a20d23f5b7b3d8c48050e92be7ff146039cd8"}' . PHP_EOL, 'stderr' => '']);
+        assert($retryCalls === 1);
+
+        $secretFailure = $cli->run($options, static function (): array { throw new RuntimeException('DB_PASS=should-not-leak'); },
+            static function (): object { throw new RuntimeException('connector should not run'); },
+            static fn (): array => []);
+        assert($secretFailure === ['exit' => 1, 'stdout' => '', 'stderr' => 'Failed-import retry was not applied.' . PHP_EOL]);
     },
 ];
