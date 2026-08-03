@@ -56,6 +56,44 @@ try {
     $audit = Get-Content -Raw -LiteralPath $auditPath | ConvertFrom-Json
     if ($audit.source_sha256 -cne $sourceHash -or $audit.definer_count -ne 2 -or $audit.qualified_reference_count -ne 22) { throw 'Audit receipt is incomplete.' }
 
+    foreach ($outsideDefinerSql in @(
+        'SELECT DEFINER=`outside`@`%`;',
+        'SELECT SQL SECURITY DEFINER;'
+    )) {
+        $outsideDefinerPath = Join-Path $testRoot ('outside-definer-{0}.sql' -f [guid]::NewGuid())
+        [IO.File]::WriteAllText($outsideDefinerPath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$outsideDefinerSql`n"), (New-Object Text.UTF8Encoding($false)))
+        $outsideDefinerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $outsideDefinerPath).Hash.ToLowerInvariant()
+        Assert-Throws { & $scriptPath -BackupPath $outsideDefinerPath -ExpectedSourceSha256 $outsideDefinerHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260804_1' -OutputPath "$outsideDefinerPath.out" -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 } 'outside a recognized VIEW'
+        if (Test-Path -LiteralPath "$outsideDefinerPath.out") { throw 'Outside definer left sanitized output.' }
+    }
+
+    $protectedDefinerText = @"
+INSERT INTO ``audit_log`` VALUES ('literal DEFINER=``keep``@``%`` SQL SECURITY DEFINER');
+-- DEFINER=``comment``@``%`` SQL SECURITY DEFINER
+/* DEFINER=``block_comment``@``%`` SQL SECURITY DEFINER */
+"@
+    $protectedDefinerSourcePath = Join-Path $testRoot 'protected-definer-source.sql'
+    $protectedDefinerOutputPath = Join-Path $testRoot 'protected-definer-sanitized.sql'
+    [IO.File]::WriteAllText($protectedDefinerSourcePath, ((Get-TestDump -DatabaseName 'D365_finance') + "`n$protectedDefinerText"), (New-Object Text.UTF8Encoding($false)))
+    $protectedDefinerHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $protectedDefinerSourcePath).Hash.ToLowerInvariant()
+    & $scriptPath -BackupPath $protectedDefinerSourcePath -ExpectedSourceSha256 $protectedDefinerHash -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260804_1' -OutputPath $protectedDefinerOutputPath -ExpectedDefinerCount 2 -ExpectedQualifiedReferenceCount 22 | Out-Null
+    if ([IO.File]::ReadAllText($protectedDefinerOutputPath) -notmatch [regex]::Escape($protectedDefinerText.Trim())) { throw 'Sanitizer changed protected definer text.' }
+
+    $invokerIdentitySourcePath = Join-Path $testRoot 'invoker-identity-source.sql'
+    $invokerIdentityOutputPath = Join-Path $testRoot 'invoker-identity-sanitized.sql'
+    $invokerIdentityDump = (Get-TestDump -DatabaseName 'D365_finance').Replace(
+        'DEFINER=`kaew`@`%` SQL SECURITY DEFINER',
+        'DEFINER=`d365_finance_prod_migrator`@`%` SQL SECURITY INVOKER'
+    )
+    [IO.File]::WriteAllText($invokerIdentitySourcePath, $invokerIdentityDump, (New-Object Text.UTF8Encoding($false)))
+    $invokerIdentityHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $invokerIdentitySourcePath).Hash.ToLowerInvariant()
+    & $scriptPath -BackupPath $invokerIdentitySourcePath -ExpectedSourceSha256 $invokerIdentityHash `
+        -SourceDatabase 'D365_finance' -RehearsalDatabase 'D365_finance_rehearsal_20260804_1' `
+        -OutputPath $invokerIdentityOutputPath -ExpectedDefinerCount 0 -ExpectedQualifiedReferenceCount 22 | Out-Null
+    $invokerIdentitySanitized = [IO.File]::ReadAllText($invokerIdentityOutputPath)
+    if ($invokerIdentitySanitized -match 'DEFINER\s*=|SQL SECURITY DEFINER') { throw 'INVOKER fixture retained a definer.' }
+    if (([regex]::Matches($invokerIdentitySanitized, 'SQL SECURITY INVOKER')).Count -ne 2) { throw 'INVOKER fixture changed its security count.' }
+
     $checkpointPath = Join-Path $testRoot 'checkpoint.json'
     [ordered]@{
         database = 'D365_finance'

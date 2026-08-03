@@ -274,7 +274,9 @@ for ($tokenIndex = 0; $tokenIndex -lt $sqlTokens.Count; $tokenIndex++) {
     }
 }
 
-$definerPattern = '(?is)\bDEFINER\s*=\s*`[^`]+`\s*@\s*`[^`]+`\s+SQL\s+SECURITY\s+DEFINER\b'
+$definerIdentityPattern = '(?is)\bDEFINER\s*=\s*`[^`]+`\s*@\s*`[^`]+`'
+$definerSecurityPattern = '(?is)\bSQL\s+SECURITY\s+DEFINER\b'
+$invokerSecurityPattern = '(?is)\bSQL\s+SECURITY\s+INVOKER\b'
 $sourceQualifierPattern = '`' + [regex]::Escape($SourceDatabase) + '`\.'
 $sourceQualifierOptions = [Text.RegularExpressions.RegexOptions]::IgnoreCase
 $viewBlockPattern = '(?is)/\*!\d{5}\s+CREATE\s+ALGORITHM\b.*?\bVIEW\b.*?\*/;'
@@ -293,7 +295,8 @@ function Test-MatchInsideRanges {
 function Convert-ViewBlock {
     param(
         [string] $Block,
-        [string] $DefinerPattern,
+        [string] $DefinerIdentityPattern,
+        [string] $DefinerSecurityPattern,
         [string] $QualifierPattern,
         [string] $ReplacementDatabase
     )
@@ -303,26 +306,31 @@ function Convert-ViewBlock {
     $cursor = 0
     foreach ($protectedSpan in $protectedSpans) {
         $nonStringSegment = $Block.Substring($cursor, $protectedSpan.Index - $cursor)
-        $nonStringSegment = [regex]::Replace($nonStringSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
+        $nonStringSegment = [regex]::Replace($nonStringSegment, $DefinerIdentityPattern, '')
+        $nonStringSegment = [regex]::Replace($nonStringSegment, $DefinerSecurityPattern, 'SQL SECURITY INVOKER')
         $nonStringSegment = [regex]::Replace($nonStringSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
         [void] $builder.Append($nonStringSegment)
         [void] $builder.Append($Block.Substring($protectedSpan.Index, $protectedSpan.Length))
         $cursor = $protectedSpan.Index + $protectedSpan.Length
     }
     $remainingSegment = $Block.Substring($cursor)
-    $remainingSegment = [regex]::Replace($remainingSegment, $DefinerPattern, 'SQL SECURITY INVOKER')
+    $remainingSegment = [regex]::Replace($remainingSegment, $DefinerIdentityPattern, '')
+    $remainingSegment = [regex]::Replace($remainingSegment, $DefinerSecurityPattern, 'SQL SECURITY INVOKER')
     $remainingSegment = [regex]::Replace($remainingSegment, $QualifierPattern, ('`' + $ReplacementDatabase + '`.'), [Text.RegularExpressions.RegexOptions]::IgnoreCase)
     [void] $builder.Append($remainingSegment)
     return $builder.ToString()
 }
-$allDefiners = @([regex]::Matches($sourceText, $definerPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
+$allDefinerIdentities = @([regex]::Matches($sourceText, $definerIdentityPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
+$allDefinerSecurityClauses = @([regex]::Matches($sourceText, $definerSecurityPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
+$allInvokerSecurityClauses = @([regex]::Matches($sourceText, $invokerSecurityPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
 $allQualifiedReferences = @([regex]::Matches($sourceText, $sourceQualifierPattern, $sourceQualifierOptions) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sourceLexicalSpans.ProtectedSpans) })
-$outsideDefiners = @($allDefiners | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $viewBlocks) })
+$outsideDefiners = @($allDefinerIdentities + $allDefinerSecurityClauses + $allInvokerSecurityClauses | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $viewBlocks) })
 $outsideQualifiedReferences = @($allQualifiedReferences | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $viewBlocks) })
 if ($outsideDefiners.Count -ne 0 -or $outsideQualifiedReferences.Count -ne 0) {
     throw "Source dump contains a definer or source qualifier outside a recognized VIEW DDL block (views=$($viewBlocks.Count), outside_definers=$($outsideDefiners.Count), outside_qualifiers=$($outsideQualifiedReferences.Count))."
 }
-$definerCount = $allDefiners.Count
+$definerCount = $allDefinerSecurityClauses.Count
+$expectedInvokerCount = $allDefinerSecurityClauses.Count + $allInvokerSecurityClauses.Count
 $qualifiedReferenceCount = $allQualifiedReferences.Count
 if ($definerCount -ne $ExpectedDefinerCount) {
     throw "Unexpected definer count: expected $ExpectedDefinerCount, found $definerCount."
@@ -335,7 +343,8 @@ $textBuilder = New-Object Text.StringBuilder
 $cursor = 0
 foreach ($viewBlock in $viewBlocks) {
     [void] $textBuilder.Append($sourceText.Substring($cursor, $viewBlock.Index - $cursor))
-    $sanitizedBlock = Convert-ViewBlock -Block $viewBlock.Value -DefinerPattern $definerPattern `
+    $sanitizedBlock = Convert-ViewBlock -Block $viewBlock.Value -DefinerIdentityPattern $definerIdentityPattern `
+        -DefinerSecurityPattern $definerSecurityPattern `
         -QualifierPattern $sourceQualifierPattern -ReplacementDatabase $RehearsalDatabase
     [void] $textBuilder.Append($sanitizedBlock)
     $cursor = $viewBlock.Index + $viewBlock.Length
@@ -353,7 +362,7 @@ if ($remainingDefiners.Count -ne 0) {
 if ($remainingSourceQualifiers.Count -ne 0) {
     throw 'Sanitized dump retained a source database qualifier.'
 }
-if ((@([regex]::Matches($sanitizedText, '(?i)\bSQL\s+SECURITY\s+INVOKER\b') | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })).Count -ne $ExpectedDefinerCount) {
+if ((@([regex]::Matches($sanitizedText, $invokerSecurityPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })).Count -ne $expectedInvokerCount) {
     throw 'Sanitized dump has an unexpected INVOKER count.'
 }
 if ((@([regex]::Matches($sanitizedText, $rehearsalQualifierPattern) | Where-Object { -not (Test-MatchInsideRanges -Match $_ -Ranges $sanitizedLexicalSpans.ProtectedSpans) })).Count -ne $ExpectedQualifiedReferenceCount) {
