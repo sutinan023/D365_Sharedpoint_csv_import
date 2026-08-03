@@ -8,55 +8,63 @@ function Assert-Throws([scriptblock] $Action, [string] $Pattern) {
 }
 function Assert-True([bool] $Condition, [string] $Message) { if (-not $Condition) { throw $Message } }
 
-$script:fakeScheduledTasks = @()
-$script:scheduledTaskOperations = [Collections.Generic.List[string]]::new()
+$schedulerState = [pscustomobject]@{
+    Commands = [Collections.Generic.List[object]]::new()
+    TaskDefinitions = @{}
+    XmlOverride = $null
+    CsvStateOverride = $null
+    FailStateChange = $false
+}
+$script:schedulerCommands = $schedulerState.Commands
 
-function Get-ScheduledTask {
-    [CmdletBinding()]
-    param([string] $TaskName)
-
-    if ($PSBoundParameters.ContainsKey('TaskName')) {
-        return @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })
+function Reset-FakeSchtasks {
+    $schedulerState.Commands.Clear()
+    $schedulerState.TaskDefinitions = @{
+        '\D365 SharePoint CSV Import [PROD]' = @{ Enabled=$false; State='Disabled' }
+        '\D365 File CSV Import [PROD]' = @{ Enabled=$true; State='Ready' }
+        '\D365 SharePoint CSV Download Cleanup [PROD]' = @{ Enabled=$true; State='Running' }
     }
-    return @($script:fakeScheduledTasks)
+    $schedulerState.XmlOverride = $null
+    $schedulerState.CsvStateOverride = $null
+    $schedulerState.FailStateChange = $false
 }
 
-function Stop-ScheduledTask {
-    [CmdletBinding(DefaultParameterSetName = 'Name')]
-    param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'Input')][object] $InputObject,
-        [Parameter(Mandatory = $true, ParameterSetName = 'Name')][string] $TaskName
-    )
+$fakeSchtasks = {
+    param([string[]] $Arguments)
 
-    $task = if ($PSCmdlet.ParameterSetName -ceq 'Input') { $InputObject } else { @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })[0] }
-    $script:scheduledTaskOperations.Add("$($PSCmdlet.ParameterSetName):Stop:$($task.TaskName)")
-    $task.State = 'Ready'
-}
+    $schedulerState.Commands.Add(@($Arguments))
+    $taskIndex = [Array]::IndexOf($Arguments, '/TN')
+    $taskName = if ($taskIndex -ge 0 -and $taskIndex + 1 -lt $Arguments.Count) { $Arguments[$taskIndex + 1] } else { '' }
+    if (-not $schedulerState.TaskDefinitions.ContainsKey($taskName)) {
+        return [pscustomobject]@{ ExitCode=1; Output='Task was not found.' }
+    }
+    $task = $schedulerState.TaskDefinitions[$taskName]
+    if ($Arguments -contains '/Query' -and $Arguments -contains '/XML') {
+        if ($null -ne $schedulerState.XmlOverride) { return [pscustomobject]@{ ExitCode=0; Output=$schedulerState.XmlOverride } }
+        $enabled = if ($task.Enabled) { 'true' } else { 'false' }
+        $xml = '<Task><RegistrationInfo><URI>{0}</URI></RegistrationInfo><Settings><Enabled>{1}</Enabled></Settings></Task>' -f $taskName, $enabled
+        return [pscustomobject]@{ ExitCode=0; Output=$xml }
+    }
+    if ($Arguments -contains '/Query' -and $Arguments -contains '/FO') {
+        $state = if ($null -ne $schedulerState.CsvStateOverride) { $schedulerState.CsvStateOverride } else { $task.State }
+        return [pscustomobject]@{ ExitCode=0; Output=('"{0}","N/A","{1}","Interactive/Background"' -f $taskName, $state) }
+    }
+    if ($Arguments -contains '/End') {
+        if ($schedulerState.FailStateChange) { return [pscustomobject]@{ ExitCode=1; Output='State change failed.' } }
+        $task.State = 'Ready'
+        return [pscustomobject]@{ ExitCode=0; Output='' }
+    }
+    if ($Arguments -contains '/Change') {
+        if ($schedulerState.FailStateChange) { return [pscustomobject]@{ ExitCode=1; Output='State change failed.' } }
+        if ($Arguments -contains '/Disable') { $task.Enabled = $false; $task.State = 'Disabled' }
+        if ($Arguments -contains '/Enable') { $task.Enabled = $true; $task.State = 'Ready' }
+        return [pscustomobject]@{ ExitCode=0; Output='' }
+    }
+    return [pscustomobject]@{ ExitCode=1; Output='Unsupported command.' }
+}.GetNewClosure()
 
-function Disable-ScheduledTask {
-    [CmdletBinding(DefaultParameterSetName = 'Name')]
-    param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'Input')][object] $InputObject,
-        [Parameter(Mandatory = $true, ParameterSetName = 'Name')][string] $TaskName
-    )
-
-    $task = if ($PSCmdlet.ParameterSetName -ceq 'Input') { $InputObject } else { @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })[0] }
-    $script:scheduledTaskOperations.Add("$($PSCmdlet.ParameterSetName):Disable:$($task.TaskName)")
-    $task.State = 'Disabled'
-    return $task
-}
-
-function Enable-ScheduledTask {
-    [CmdletBinding(DefaultParameterSetName = 'Name')]
-    param(
-        [Parameter(Mandatory = $true, ParameterSetName = 'Input')][object] $InputObject,
-        [Parameter(Mandatory = $true, ParameterSetName = 'Name')][string] $TaskName
-    )
-
-    $task = if ($PSCmdlet.ParameterSetName -ceq 'Input') { $InputObject } else { @($script:fakeScheduledTasks | Where-Object { $_.TaskName -like $TaskName })[0] }
-    $script:scheduledTaskOperations.Add("$($PSCmdlet.ParameterSetName):Enable:$($task.TaskName)")
-    $task.State = 'Ready'
-    return $task
+function Assert-NoStateChanges([string] $Message) {
+    Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/End' -or $_ -contains '/Change' }).Count -eq 0) $Message
 }
 
 $root = Join-Path ([IO.Path]::GetTempPath()) ('manual-migration-adapter-{0}' -f [guid]::NewGuid())
@@ -88,9 +96,14 @@ try {
     }}
     $waitEvents = [Collections.Generic.List[string]]::new()
     $wait = { param([string]$Database,[string]$Path) $waitEvents.Add("$Database|$Path") }.GetNewClosure()
+    Assert-True ((Get-D365TaskSchedulerComputerName '\\100.1.1.166\D365') -ceq '100.1.1.166') 'UNC scheduler computer derivation is wrong.'
+    Assert-True ((Get-D365TaskSchedulerComputerName $root) -ceq [string] $env:COMPUTERNAME) 'Local scheduler computer derivation is wrong.'
+    Assert-Throws { Get-D365TaskSchedulerComputerName 'relative\production' | Out-Null } 'absolute local path or UNC'
+    Reset-FakeSchtasks
     $adapter = New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
-        -ProductionRoot (Join-Path $root 'prod') -BackupRoot (Join-Path $root 'backup') `
-        -PhpPath $php -AppliedBy 'tester' -WaitForManualRestore $wait
+        -ProductionRoot '\\100.1.1.166\D365' -BackupRoot (Join-Path $root 'backup') `
+        -PhpPath $php -AppliedBy 'tester' -WaitForManualRestore $wait `
+        -TaskSchedulerComputerName '100.1.1.166' -ScheduledTaskCommandAdapter $fakeSchtasks
     if ($adapter -isnot [scriptblock]) { throw 'Manual restore adapter was not created.' }
     $context = @{RehearsalDatabase='D365_finance_prod_rehearsal_r1';SanitizedPath=(Join-Path $root 'sanitized.sql')}
     $instructions = & $adapter 'show-manual-restore-instructions' $context
@@ -100,46 +113,51 @@ try {
     & $adapter 'wait-for-manual-restore' $context | Out-Null
     Assert-True ($waitEvents.Count -eq 1) 'Manual restore wait callback was not invoked.'
 
-    $literalTaskName = 'D365 SharePoint CSV Import [PROD]'
-    $decoyTaskName = 'D365 SharePoint CSV Import P'
-    $previouslyDisabledTaskName = 'D365 CSV Cleanup [PROD]'
-    $previouslyDisabledDecoyTaskName = 'D365 CSV Cleanup P'
-    $script:fakeScheduledTasks = @(
-        [pscustomobject]@{TaskName=$literalTaskName;TaskPath='\';State='Running'},
-        [pscustomobject]@{TaskName=$decoyTaskName;TaskPath='\';State='Ready'},
-        [pscustomobject]@{TaskName=$previouslyDisabledTaskName;TaskPath='\';State='Disabled'},
-        [pscustomobject]@{TaskName=$previouslyDisabledDecoyTaskName;TaskPath='\';State='Ready'}
-    )
-    $script:scheduledTaskOperations.Clear()
-    $disabled = & $adapter 'disable-production-tasks' @{TaskNames=@($literalTaskName, $previouslyDisabledTaskName)}
-    Assert-True (@($disabled.PreviouslyEnabledTasks).Count -eq 1 -and $disabled.PreviouslyEnabledTasks[0] -ceq $literalTaskName) `
-        'Literal [PROD] task was not resolved before the wildcard decoy.'
-    Assert-True ($script:fakeScheduledTasks[0].State -ceq 'Disabled' -and $script:fakeScheduledTasks[1].State -ceq 'Ready') `
-        'Literal task was not stopped and disabled without changing its decoy.'
-    Assert-True ($script:fakeScheduledTasks[2].State -ceq 'Disabled' -and $script:fakeScheduledTasks[3].State -ceq 'Ready') `
-        'Previously disabled literal task or its decoy changed state.'
-    Assert-True (@($script:scheduledTaskOperations | Where-Object { $_ -notmatch '^Input:' }).Count -eq 0) `
-        'Scheduled Task control did not use resolved task objects.'
+    $disabled = & $adapter 'disable-production-tasks' @{TaskNames=@(
+        'D365 SharePoint CSV Import [PROD]',
+        'D365 File CSV Import [PROD]',
+        'D365 SharePoint CSV Download Cleanup [PROD]'
+    )}
+    Assert-True (@($disabled.PreviouslyEnabledTasks).Count -eq 2 -and
+        $disabled.PreviouslyEnabledTasks -ccontains '\D365 File CSV Import [PROD]' -and
+        $disabled.PreviouslyEnabledTasks -ccontains '\D365 SharePoint CSV Download Cleanup [PROD]') `
+        'Only initially enabled full task names should be saved.'
+    $firstMutation = @($schedulerState.Commands | ForEach-Object -Begin { $i = 0 } -Process { $result = [pscustomobject]@{Index=$i; Command=$_}; $i++; $result } | Where-Object { $_.Command -contains '/End' -or $_.Command -contains '/Change' } | Select-Object -First 1).Index
+    Assert-True (@($schedulerState.Commands | Select-Object -First $firstMutation | Where-Object { $_ -notcontains '/Query' }).Count -eq 0) `
+        'Every task query must finish before the first state-changing command.'
+    Assert-True (@($schedulerState.Commands | Where-Object { [Array]::IndexOf($_, '/S') -lt 0 -or $_[[Array]::IndexOf($_, '/S') + 1] -cne '100.1.1.166' }).Count -eq 0) `
+        'Every scheduler command must target 100.1.1.166.'
+    Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/End' -and $_ -contains '\D365 SharePoint CSV Download Cleanup [PROD]' }).Count -eq 1) `
+        'The running task was not ended.'
+    Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Change' -and $_ -contains '/Disable' }).Count -eq 2) `
+        'Exactly the initially enabled tasks must be disabled.'
     $restored = & $adapter 'restore-production-task-states' @{}
-    Assert-True (@($restored.RestoredTasks).Count -eq 1 -and $restored.RestoredTasks[0] -ceq $literalTaskName) `
-        'Restore result did not preserve the previously enabled literal task.'
-    Assert-True ($script:fakeScheduledTasks[0].State -ceq 'Ready' -and $script:fakeScheduledTasks[2].State -ceq 'Disabled') `
-        'Restore did not re-enable only the task enabled before cutover.'
-    Assert-True (@($script:scheduledTaskOperations | Where-Object { $_ -notmatch '^Input:' }).Count -eq 0) `
-        'Scheduled Task restore did not use resolved task objects.'
+    Assert-True (@($restored.RestoredTasks).Count -eq 2) 'Restore result did not preserve initially enabled full task names.'
+    Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Change' -and $_ -contains '/Enable' }).Count -eq 2) `
+        'Restore must enable only tasks that were initially enabled.'
+    Assert-True (-not $schedulerState.TaskDefinitions['\D365 SharePoint CSV Import [PROD]'].Enabled) `
+        'A task initially disabled must remain disabled after restoration.'
 
-    $script:fakeScheduledTasks = @()
-    $script:scheduledTaskOperations.Clear()
-    Assert-Throws { & $adapter 'disable-production-tasks' @{TaskNames=@($literalTaskName)} | Out-Null } 'exactly one'
-    Assert-True ($script:scheduledTaskOperations.Count -eq 0) 'Task controls ran when a requested task had no exact match.'
+    foreach ($failure in @('missing-task','invalid-xml','uri-mismatch','unknown-state')) {
+        Reset-FakeSchtasks
+        if ($failure -ceq 'invalid-xml') { $schedulerState.XmlOverride = '<not xml' }
+        if ($failure -ceq 'uri-mismatch') { $schedulerState.XmlOverride = '<Task><RegistrationInfo><URI>\Wrong [PROD]</URI></RegistrationInfo><Settings><Enabled>true</Enabled></Settings></Task>' }
+        if ($failure -ceq 'unknown-state') { $schedulerState.CsvStateOverride = 'Unknown' }
+        $taskNames = if ($failure -ceq 'missing-task') { @('Missing [PROD]') } else { @('D365 File CSV Import [PROD]') }
+        Assert-Throws { & $adapter 'disable-production-tasks' @{TaskNames=$taskNames} | Out-Null } 'task|Task|XML|XML|state|State'
+        Assert-NoStateChanges "State-changing command ran for pre-validation failure: $failure"
+    }
 
-    $script:fakeScheduledTasks = @(
-        [pscustomobject]@{TaskName=$literalTaskName;TaskPath='\One\';State='Ready'},
-        [pscustomobject]@{TaskName=$literalTaskName;TaskPath='\Two\';State='Ready'}
-    )
-    $script:scheduledTaskOperations.Clear()
-    Assert-Throws { & $adapter 'disable-production-tasks' @{TaskNames=@($literalTaskName)} | Out-Null } 'exactly one'
-    Assert-True ($script:scheduledTaskOperations.Count -eq 0) 'Task controls ran when a requested task had duplicate exact matches.'
+    Reset-FakeSchtasks
+    $schedulerState.FailStateChange = $true
+    Assert-Throws { & $adapter 'disable-production-tasks' @{TaskNames=@('D365 File CSV Import [PROD]')} | Out-Null } 'failed|Failed|exit|Exit'
+    Assert-True (@($schedulerState.Commands | Where-Object { $_ -contains '/Change' }).Count -eq 1) 'A failing state-changing command was not invoked exactly once.'
+    Assert-Throws {
+        New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
+            -ProductionRoot (Join-Path $root 'prod') -BackupRoot (Join-Path $root 'backup') `
+            -PhpPath $php -AppliedBy 'tester' -WaitForManualRestore $wait `
+            -TaskSchedulerComputerName ' ' -ScheduledTaskCommandAdapter $fakeSchtasks | Out-Null
+    } 'computer'
     Assert-Throws {
         New-D365ManualRestoreMigrationAdapter -Manifest $manifest -SourceProjects $projects `
             -ProductionRoot (Join-Path $root 'prod') -BackupRoot (Join-Path $root 'backup') `

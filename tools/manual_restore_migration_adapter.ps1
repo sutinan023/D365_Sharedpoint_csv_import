@@ -85,6 +85,12 @@ function Complete-D365ManualRestoreWizard {
     [pscustomobject]@{ RestoreEvidencePath=$evidencePath; RestoreReceiptPath=$receiptPath }
 }
 
+function Get-D365TaskSchedulerComputerName([string] $ProductionRoot) {
+    if ($ProductionRoot -match '^\\\\([^\\]+)\\') { return [string] $Matches[1] }
+    if ([IO.Path]::IsPathRooted($ProductionRoot)) { return [string] $env:COMPUTERNAME }
+    throw 'ProductionRoot must be an absolute local path or UNC path.'
+}
+
 function New-D365ManualRestoreMigrationAdapter {
     param(
         [Parameter(Mandatory = $true)][object] $Manifest,
@@ -93,35 +99,84 @@ function New-D365ManualRestoreMigrationAdapter {
         [Parameter(Mandatory = $true)][string] $BackupRoot,
         [Parameter(Mandatory = $true)][string] $PhpPath,
         [Parameter(Mandatory = $true)][string] $AppliedBy,
-        [Parameter(Mandatory = $true)][scriptblock] $WaitForManualRestore
+        [Parameter(Mandatory = $true)][scriptblock] $WaitForManualRestore,
+        [string] $TaskSchedulerComputerName,
+        [scriptblock] $ScheduledTaskCommandAdapter = $null
     )
 
     if (-not (Test-Path -LiteralPath $PhpPath -PathType Leaf)) { throw "PHP executable not found: $PhpPath" }
     if ($AppliedBy -notmatch '^[A-Za-z0-9_.@-]+$') { throw 'Migration applied-by value contains unsafe characters.' }
+    if (-not $PSBoundParameters.ContainsKey('TaskSchedulerComputerName')) {
+        $TaskSchedulerComputerName = Get-D365TaskSchedulerComputerName $ProductionRoot
+    }
+    if ([string]::IsNullOrWhiteSpace($TaskSchedulerComputerName)) { throw 'Task Scheduler computer name is required.' }
+    if ($null -eq $ScheduledTaskCommandAdapter) {
+        $ScheduledTaskCommandAdapter = {
+            param([string[]] $Arguments)
+            $lines = @(& schtasks.exe @Arguments 2>&1)
+            [pscustomobject]@{ ExitCode=[int] $LASTEXITCODE; Output=($lines -join [Environment]::NewLine) }
+        }
+    }
+
+    $invokeCheckedSchtasks = {
+        param([string[]] $Arguments, [string] $Operation, [string] $TaskName)
+
+        $result = & $ScheduledTaskCommandAdapter -Arguments $Arguments
+        if ($null -eq $result -or $null -eq $result.PSObject.Properties['ExitCode'] -or
+            $result.ExitCode -isnot [int] -or $null -eq $result.PSObject.Properties['Output'] -or
+            $result.Output -isnot [string]) {
+            throw "Task Scheduler command returned an invalid result for ${Operation}: $TaskName"
+        }
+        if ($result.ExitCode -ne 0) { throw "Task Scheduler command failed for ${Operation}: $TaskName" }
+        return $result.Output
+    }.GetNewClosure()
+
+    $getTaskSnapshot = {
+        param([string] $TaskName)
+
+        $fullTaskName = '\' + $TaskName.TrimStart([char[]]@([char]'\'))
+        $xmlOutput = & $invokeCheckedSchtasks -Arguments @('/Query','/S',$TaskSchedulerComputerName,'/TN',$fullTaskName,'/XML') -Operation 'query XML' -TaskName $fullTaskName
+        try { [xml] $xml = $xmlOutput } catch { throw "Task Scheduler returned invalid XML for task: $fullTaskName" }
+        $uri = [string] $xml.Task.RegistrationInfo.URI
+        if (-not [string]::Equals($uri, $fullTaskName, [StringComparison]::Ordinal)) {
+            throw "Task Scheduler XML URI does not match requested task: $fullTaskName"
+        }
+        $enabledValue = [string] $xml.Task.Settings.Enabled
+        if ($enabledValue -cne 'true' -and $enabledValue -cne 'false') {
+            throw "Task Scheduler XML has an invalid Enabled value for task: $fullTaskName"
+        }
+
+        $csvOutput = & $invokeCheckedSchtasks -Arguments @('/Query','/S',$TaskSchedulerComputerName,'/TN',$fullTaskName,'/FO','CSV','/NH') -Operation 'query CSV' -TaskName $fullTaskName
+        $csvMatch = [regex]::Match($csvOutput, '^\s*"(?<name>(?:[^"]|"")*)"\s*,\s*"(?:[^"]|"")*"\s*,\s*"(?<state>(?:[^"]|"")*)"\s*,\s*"(?:[^"]|"")*"')
+        if (-not $csvMatch.Success) { throw "Task Scheduler returned invalid CSV for task: $fullTaskName" }
+        $returnedName = $csvMatch.Groups['name'].Value.Replace('""', '"')
+        $stateName = $csvMatch.Groups['state'].Value.Replace('""', '"')
+        if (-not [string]::Equals($returnedName, $fullTaskName, [StringComparison]::Ordinal)) {
+            throw "Task Scheduler CSV task name does not match requested task: $fullTaskName"
+        }
+        if ($stateName -cnotin @('Running','Ready','Disabled')) {
+            throw "Task Scheduler returned an invalid state for task: $fullTaskName"
+        }
+        [pscustomobject]@{ FullName=$fullTaskName; Enabled=($enabledValue -ceq 'true'); State=$stateName }
+    }.GetNewClosure()
+
     $productionProjectRoot = Join-Path $ProductionRoot 'D365_Sharedpoint_csv_import'
-    $state = @{ PreviouslyEnabledTasks=@(); PreviouslyEnabledTaskObjects=@(); ApplyResults=@() }
+    $state = @{ PreviouslyEnabledTasks=@(); ApplyResults=@() }
     return {
         param([string] $Stage, [hashtable] $Context)
         switch ($Stage) {
             'disable-production-tasks' {
-                $tasks = @()
-                foreach ($taskName in $Context.TaskNames) {
-                    $matches = @(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {
-                        [string]::Equals([string] $_.TaskName, [string] $taskName, [StringComparison]::Ordinal)
-                    })
-                    if ($matches.Count -ne 1) {
-                        throw "Production Scheduled Task must resolve to exactly one literal name: $taskName ($($matches.Count) matches)"
+                $snapshots = @($Context.TaskNames | ForEach-Object { & $getTaskSnapshot ([string] $_) })
+                $enabled = @($snapshots | Where-Object Enabled | ForEach-Object FullName)
+                foreach ($snapshot in $snapshots) {
+                    if ($snapshot.State -ceq 'Running') {
+                        & $invokeCheckedSchtasks -Arguments @('/End','/S',$TaskSchedulerComputerName,'/TN',$snapshot.FullName) -Operation 'end task' -TaskName $snapshot.FullName | Out-Null
                     }
-                    $tasks += $matches[0]
-                }
-                $enabledTasks = @($tasks | Where-Object State -cne 'Disabled')
-                $enabled = @($enabledTasks | ForEach-Object TaskName)
-                foreach ($task in $tasks) {
-                    if ($task.State -ceq 'Running') { Stop-ScheduledTask -InputObject $task }
-                    if ($task.State -cne 'Disabled') { Disable-ScheduledTask -InputObject $task | Out-Null }
+                    if ($snapshot.Enabled) {
+                        & $invokeCheckedSchtasks -Arguments @('/Change','/S',$TaskSchedulerComputerName,'/TN',$snapshot.FullName,'/Disable') -Operation 'disable task' -TaskName $snapshot.FullName | Out-Null
+                    }
                 }
                 $state.PreviouslyEnabledTasks = $enabled
-                $state.PreviouslyEnabledTaskObjects = $enabledTasks
                 return [pscustomobject]@{Success=$true;PreviouslyEnabledTasks=$enabled}
             }
             'checkpoint-production' {
@@ -182,7 +237,10 @@ function New-D365ManualRestoreMigrationAdapter {
             }
             'verify-production' { return [pscustomobject]@{Success=$true} }
             'restore-production-task-states' {
-                foreach ($task in $state.PreviouslyEnabledTaskObjects) { Enable-ScheduledTask -InputObject $task | Out-Null }
+                foreach ($fullTaskName in $state.PreviouslyEnabledTasks) {
+                    & $getTaskSnapshot $fullTaskName | Out-Null
+                    & $invokeCheckedSchtasks -Arguments @('/Change','/S',$TaskSchedulerComputerName,'/TN',$fullTaskName,'/Enable') -Operation 'enable task' -TaskName $fullTaskName | Out-Null
+                }
                 return [pscustomobject]@{Success=$true;RestoredTasks=@($state.PreviouslyEnabledTasks)}
             }
             default { throw "Unsupported migration stage: $Stage" }
