@@ -8,6 +8,7 @@ $files = [
     __DIR__ . '/Config/EnvironmentBannerTest.php',
     __DIR__ . '/Database/MigrationRunnerTest.php',
     __DIR__ . '/Database/StagingInvoiceNumberMigrationContractTest.php',
+    __DIR__ . '/Database/UatMigrationToolContractTest.php',
     __DIR__ . '/Database/FinanceViewMigrationContractTest.php',
     __DIR__ . '/Database/SchemaInventoryTest.php',
     __DIR__ . '/Database/CheckpointBaselineTest.php',
